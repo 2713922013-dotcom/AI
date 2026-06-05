@@ -4,7 +4,7 @@ import { useDropzone } from 'react-dropzone'
 import {
   Upload, FileText, Search, MapPin, Zap,
   Target, TrendingUp, Shield, Users, ArrowRight,
-  Sparkles, CheckCircle, Loader2
+  Sparkles, CheckCircle, Loader2, Briefcase
 } from 'lucide-react'
 import { analyzeResume } from '../services/api'
 
