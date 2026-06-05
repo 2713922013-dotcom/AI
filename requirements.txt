@@ -7,4 +7,4 @@ python-multipart
 httpx
 aiofiles
 openai
-PyPDF2
+pdfplumber

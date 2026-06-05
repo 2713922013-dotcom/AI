@@ -36,8 +36,9 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, Text, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from openai import OpenAI
-import PyPDF2
+import pdfplumber
 import io
+import re
 
 # ============================================================
 # 配置
@@ -216,15 +217,28 @@ class ResumeAnalyzerAgent:
         self.client = deepseek_client
     
     def extract_text_from_pdf(self, pdf_content: bytes) -> str:
-        """从PDF提取文本"""
+        """从PDF提取文本并使用pdfplumber清洗"""
         try:
-            pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_content))
             text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() or ""
-            return text.strip()
+            with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            if not text.strip():
+                raise ValueError("PDF中未检测到可提取的文本，可能是扫描版PDF")
+            return self._clean_text(text)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"PDF解析失败: {str(e)}")
+    
+    def _clean_text(self, text: str) -> str:
+        """清洗PDF提取的文本"""
+        text = re.sub(r'Page \d+ of \d+', '', text)     # 去掉页码
+        text = re.sub(r'\n{3,}', '\n\n', text)          # 多个换行变2个
+        text = re.sub(r'[ \t]{2,}', ' ', text)          # 多空格/制表符变1个
+        text = re.sub(r'[^\S\n]{2,}', ' ', text)        # 多余空白（保留换行）
+        text = text.strip()
+        return text
     
     async def analyze(self, resume_text: str) -> ResumeParsedData:
         """调用AI解析简历"""
