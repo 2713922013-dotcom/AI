@@ -272,64 +272,76 @@ class ResumeAnalyzerAgent:
     
     def _basic_parse(self, text: str) -> ResumeParsedData:
         """基础正则解析（AI不可用时的降级方案）"""
-        # 提取姓名
+        
+        # 打印前500字用于调试正则匹配
+        print(f"=== BASIC_PARSE DEBUG ===\n{text[:500]}\n=== END DEBUG ===")
+        
+        # 提取姓名 - 匹配 "姓名" 后面的中文
         name = ""
-        name_match = re.search(r'姓\s*名\s*[:：]\s*(\S+)', text)
-        if name_match:
-            name = name_match.group(1)
+        for pat in [r'姓\s*名\s*[:：]\s*([\u4e00-\u9fa5]{2,4})', r'姓名[为是]*[:：]\s*([\u4e00-\u9fa5]{2,4})']:
+            m = re.search(pat, text)
+            if m:
+                name = m.group(1).strip()
+                break
         
         # 提取邮箱
         email = ""
-        email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', text)
+        email_match = re.search(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', text)
         if email_match:
             email = email_match.group(0)
         
         # 提取手机号
         phone = ""
-        phone_match = re.search(r'(?:1[3-9]\d{9})', text)
+        phone_match = re.search(r'(?:1[3-9])\d{9}', text)
         if phone_match:
             phone = phone_match.group(0)
+        else:
+            # 也尝试匹配带空格/横线的格式
+            phone_match2 = re.search(r'1[3-9][\s-]?\d{4}[\s-]?\d{4}', text.replace(' ', ''))
+            if phone_match2:
+                phone = re.sub(r'[\s-]', '', phone_match2.group(0))
         
         # 提取学历
         education = "本科"
-        for level in ["博士", "硕士", "本科", "大专", "高中"]:
+        for level in ["博士", "硕士", "本科", "大专"]:
             if level in text:
                 education = level
                 break
         
-        # 提取学校（找"学院"/"大学"前后的文字）
+        # 提取学校 - 更宽松的匹配
         school = ""
-        school_patterns = [
-            r'([\u4e00-\u9fa5]*(?:大学|学院|职业技术学院))',
-            r'学校[名称]*[:：]\s*([\u4e00-\u9fa5]*)',
-        ]
-        for pat in school_patterns:
-            m = re.search(pat, text)
-            if m:
-                school = m.group(1).strip()
-                if len(school) > 2:
-                    break
+        # 先尝试找 "学校" 关键词附近
+        school_match = re.search(r'([\u4e00-\u9fa5]*(?:大学|学院|职业技术学院))', text)
+        if school_match:
+            school = school_match.group(1).strip()
         
-        # 提取专业（括号内的内容或"专业"后面的文字）
+        # 提取专业 - 括号内内容或"专业"关键词后
         major = ""
-        major_patterns = [
-            r'\(([^)]*)\)',
-            r'[（]([^）]*)[）]',
-            r'专业[名称]*[:：]\s*([\u4e00-\u9fa5]*)',
-        ]
-        for pat in major_patterns:
-            m = re.search(pat, text)
-            if m and len(m.group(1)) >= 2:
-                major = m.group(1).strip()
-                break
+        # 优先匹配 (xxx) 或 （xxx） 格式（中文简历常见）
+        bracket_match = re.search(r'[（(]([^）)]+)[）)]', text)
+        if bracket_match:
+            candidate = bracket_match.group(1).strip()
+            if len(candidate) >= 2 and any(kw in candidate for kw in ['专业', '工程', '管理', '科学', '技术', '经济', '文学', '法学']):
+                major = candidate
+        
+        # 如果括号没找到，尝试其他模式
+        if not major:
+            for pat in [r'电子商务|市场营销|计算机|软件工程|人工智能|数据科学|新闻|传播|金融|会计|工商管理|法学|文学|设计']:
+                if pat in text:
+                    major = pat
+                    break
         
         # 提取毕业年份
         graduation_year = None
-        year_match = re.search(r'(\d{4})(?:年|~|\s*-).*?(?:毕业|至今)', text)
-        if not year_match:
-            year_match = re.search(r'(\d{4}).*?~.*?(\d{4})', text)
-        if year_match:
-            graduation_year = int(year_match.group(2) if year_match.lastindex == 2 else year_match.group(1))
+        # 匹配 "2025-09 ~ 2029-06" 这种格式中的结束年份
+        year_range = re.search(r'(\d{4})\s*[~-~]\s*(\d{4})', text)
+        if year_range:
+            start_y, end_y = int(year_range.group(1)), int(year_range.group(2))
+            # 结束年份通常是毕业年份（且大于开始年份）
+            if end_y > start_y and end_y >= datetime.now().year:
+                graduation_year = end_y
+            elif start_y <= datetime.now().year + 10:
+                graduation_year = end_y if end_y > start_y else None
         
         # 技能关键词匹配
         skills_keywords = [
