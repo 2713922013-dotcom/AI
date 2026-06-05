@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: 'https://ai-f2tu.onrender.com/api',
   timeout: 120000, // 2分钟超时，因为AI分析需要时间
 })
 
