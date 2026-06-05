@@ -123,16 +123,19 @@ class AnalysisRequest(BaseModel):
 
 
 class ResumeParsedData(BaseModel):
+    name: str = ""
+    email: str = ""
+    phone: str = ""
     education: str = ""
     major: str = ""
     school: str = ""
+    graduation_year: Optional[int] = None
     skills: List[str] = []
     projects: List[Dict] = []
     internships: List[Dict] = []
     awards: List[str] = []
     certifications: List[str] = []
     gpa: Optional[float] = None
-    graduation_year: Optional[int] = None
 
 
 class JobMatchResult(BaseModel):
@@ -191,27 +194,32 @@ class ResumeAnalyzerAgent:
 
 请严格按照以下JSON格式输出，不要添加任何其他内容：
 {
+  "name": "真实姓名",
+  "email": "邮箱地址",
+  "phone": "手机号码",
   "education": "学历层次(博士/硕士/本科/大专)",
   "major": "专业名称",
-  "school": "学校名称",
-  "skills": ["技能1", "技能2"],
+  "school": "学校全称",
+  "graduation_year": 2029,
+  "skills": ["技能1", "技能2", "技能3"],
   "projects": [
     {"name": "项目名称", "description": "项目描述", "tech_stack": ["技术1", "技术2"]}
   ],
   "internships": [
-    {"company": "公司名称", "position": "职位", "duration": "时长", "description": "工作描述"}
+    {"company": "公司名称", "position": "职位名称", "duration": "2025-01~2025-06", "description": "工作描述和成就"}
   ],
   "awards": ["奖项1", "奖项2"],
   "certifications": ["证书1", "证书2"],
-  "gpa": 3.5,
-  "graduation_year": 2025
+  "gpa": 3.5
 }
 
 注意事项：
-1. 如果某项信息不存在，使用空数组[]或空字符串""
-2. 技能要尽可能完整提取，包括编程语言、框架、工具等
-3. 项目经历要提取技术栈
-4. gpa和graduation_year如果找不到，使用null"""
+1. name/email/phone/education/major/school 是必填项，必须从简历中准确提取
+2. 技能(skills)要尽可能完整提取所有能识别的技能：包括编程语言、框架、工具、软件、办公技能、设计工具、数据分析工具、运营平台等
+3. 对于非技术岗位（如新媒体运营、市场），也要提取相关技能：如PS、PR、剪映、公众号运营、短视频、文案写作、数据分析等
+4. 项目经历和实习经历要完整保留描述
+5. 如果某项信息不存在，使用空数组[]或空字符串""或null
+6. graduation_year用4位数字年份表示"""
     
     def __init__(self):
         self.client = deepseek_client
@@ -247,7 +255,7 @@ class ResumeAnalyzerAgent:
                 model="deepseek-chat",
                 messages=[
                     {"role": "system", "content": self.SYSTEM_PROMPT},
-                    {"role": "user", "content": f"请解析以下简历文本：\n\n{resume_text[:4000]}"}
+                    {"role": "user", "content": f"请解析以下简历文本：\n\n{resume_text[:6000]}"}
                 ],
                 temperature=0.1,
                 max_tokens=2000,
@@ -270,12 +278,21 @@ class ResumeAnalyzerAgent:
             "FastAPI", "TensorFlow", "PyTorch", "Pandas", "NumPy", "Scikit-learn",
             "Git", "Linux", "HTML", "CSS", "TypeScript", "R", "MATLAB",
             "Tableau", "PowerBI", "Excel", "Spark", "Hadoop", "Kafka",
-            "Figma", "Photoshop", "JIRA", "Agile", "Scrum"
+            "Figma", "Photoshop", "JIRA", "Agile", "Scrum",
+            # 运营/市场类技能
+            "视频剪辑", "剪映", "PR", "Premiere", "公众号", "新媒体运营",
+            "短视频", "文案写作", "数据分析", "市场营销", "SEO", "SEM",
+            "电商运营", "内容运营", "社群运营", "用户增长", "活动策划",
+            "Canva", "秀米", "135编辑器", "小红书", "抖音", "微博",
+            "B站", "微信", "PPT", "Word", "Axure", "XMind"
         ]
         
         found_skills = [s for s in skills_keywords if s.lower() in text.lower()]
         
         return ResumeParsedData(
+            name="",
+            email="",
+            phone="",
             education="本科",
             major="",
             school="",

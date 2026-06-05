@@ -542,22 +542,38 @@ const Dashboard = ({ data }) => {
                   <User className="w-5 h-5 text-primary" />
                   简历解析结果
                 </h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <p className="text-xs text-gray-400">学历</p>
-                    <p className="font-medium text-gray-800">{data.resume_parsed?.education || '--'}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-400">专业</p>
-                    <p className="font-medium text-gray-800">{data.resume_parsed?.major || '--'}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-400">学校</p>
-                    <p className="font-medium text-gray-800">{data.resume_parsed?.school || '--'}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-400">毕业年份</p>
-                    <p className="font-medium text-gray-800">{data.resume_parsed?.graduation_year || '--'}</p>
+                <div className="space-y-3">
+                  {/* 基本信息 */}
+                  {data.resume_parsed?.name && (
+                    <div className="pb-3 border-b border-gray-100">
+                      <p className="text-lg font-bold text-gray-900">{data.resume_parsed.name}</p>
+                      {(data.resume_parsed.email || data.resume_parsed.phone) && (
+                        <p className="text-sm text-gray-400 mt-1">
+                          {data.resume_parsed.email && <span>{data.resume_parsed.email}</span>}
+                          {data.resume_parsed.email && data.resume_parsed.phone && <span className="mx-2">·</span>}
+                          {data.resume_parsed.phone && <span>{data.resume_parsed.phone}</span>}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {/* 学历信息 */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <p className="text-xs text-gray-400">学历</p>
+                      <p className="font-medium text-gray-800">{data.resume_parsed?.education || '--'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-400">专业</p>
+                      <p className="font-medium text-gray-800">{data.resume_parsed?.major || '--'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-400">学校</p>
+                      <p className="font-medium text-gray-800">{data.resume_parsed?.school || '--'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-400">毕业年份</p>
+                      <p className="font-medium text-gray-800">{data.resume_parsed?.graduation_year || '--'}</p>
+                    </div>
                   </div>
                 </div>
                 {data.resume_parsed?.skills && (
