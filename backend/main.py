@@ -265,12 +265,73 @@ class ResumeAnalyzerAgent:
             result = json.loads(response.choices[0].message.content)
             return ResumeParsedData(**result)
         except Exception as e:
-            # Fallback: 返回基础解析
-            print(f"AI解析失败，使用基础解析: {e}")
+            # Fallback: 返回基础解析（增强版，含基本信息提取）
+            import traceback
+            traceback.print_exc()
             return self._basic_parse(resume_text)
     
     def _basic_parse(self, text: str) -> ResumeParsedData:
-        """基础关键词解析（AI不可用时的降级方案）"""
+        """基础正则解析（AI不可用时的降级方案）"""
+        # 提取姓名
+        name = ""
+        name_match = re.search(r'姓\s*名\s*[:：]\s*(\S+)', text)
+        if name_match:
+            name = name_match.group(1)
+        
+        # 提取邮箱
+        email = ""
+        email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', text)
+        if email_match:
+            email = email_match.group(0)
+        
+        # 提取手机号
+        phone = ""
+        phone_match = re.search(r'(?:1[3-9]\d{9})', text)
+        if phone_match:
+            phone = phone_match.group(0)
+        
+        # 提取学历
+        education = "本科"
+        for level in ["博士", "硕士", "本科", "大专", "高中"]:
+            if level in text:
+                education = level
+                break
+        
+        # 提取学校（找"学院"/"大学"前后的文字）
+        school = ""
+        school_patterns = [
+            r'([\u4e00-\u9fa5]*(?:大学|学院|职业技术学院))',
+            r'学校[名称]*[:：]\s*([\u4e00-\u9fa5]*)',
+        ]
+        for pat in school_patterns:
+            m = re.search(pat, text)
+            if m:
+                school = m.group(1).strip()
+                if len(school) > 2:
+                    break
+        
+        # 提取专业（括号内的内容或"专业"后面的文字）
+        major = ""
+        major_patterns = [
+            r'\(([^)]*)\)',
+            r'[（]([^）]*)[）]',
+            r'专业[名称]*[:：]\s*([\u4e00-\u9fa5]*)',
+        ]
+        for pat in major_patterns:
+            m = re.search(pat, text)
+            if m and len(m.group(1)) >= 2:
+                major = m.group(1).strip()
+                break
+        
+        # 提取毕业年份
+        graduation_year = None
+        year_match = re.search(r'(\d{4})(?:年|~|\s*-).*?(?:毕业|至今)', text)
+        if not year_match:
+            year_match = re.search(r'(\d{4}).*?~.*?(\d{4})', text)
+        if year_match:
+            graduation_year = int(year_match.group(2) if year_match.lastindex == 2 else year_match.group(1))
+        
+        # 技能关键词匹配
         skills_keywords = [
             "Python", "Java", "JavaScript", "C++", "Go", "Rust", "SQL", "MySQL",
             "PostgreSQL", "MongoDB", "Redis", "Docker", "Kubernetes", "AWS",
@@ -290,12 +351,13 @@ class ResumeAnalyzerAgent:
         found_skills = [s for s in skills_keywords if s.lower() in text.lower()]
         
         return ResumeParsedData(
-            name="",
-            email="",
-            phone="",
-            education="本科",
-            major="",
-            school="",
+            name=name,
+            email=email,
+            phone=phone,
+            education=education,
+            major=major,
+            school=school,
+            graduation_year=graduation_year,
             skills=found_skills,
             projects=[],
             internships=[],
