@@ -1,7 +1,11 @@
 import axios from 'axios'
 
+const API_BASE =
+  import.meta.env.VITE_API_BASE ||
+  'https://ai-f2tu.onrender.com/api'
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE,
+  baseURL: API_BASE,
   timeout: 120000, // 2分钟超时，因为AI分析需要时间
 })
 
