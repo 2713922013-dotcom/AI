@@ -23,14 +23,6 @@ app = FastAPI(title="Offer Hunter API", version="3.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # ============================================================
-# 前端静态文件挂载（必须在所有API路由之后）
-# ============================================================
-frontend_dist = os.path.join(os.path.dirname(__file__), "frontend", "dist")
-if os.path.isdir(frontend_dist):
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
-    print(f"✅ Frontend static files mounted from {frontend_dist}")
-
-# ============================================================
 # 岗位数据
 # ============================================================
 JOBS_DATA = get_real_jobs()
