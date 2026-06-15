@@ -1826,13 +1826,22 @@ async def get_history(limit: int = 20):
 
 # ============================================================
 # 前端静态文件挂载（必须在所有API路由之后，防止覆盖）
-# 优先从 backend/frontend/dist 加载（Render部署路径）
+# 使用 SPAStaticFiles: 只对非API路径提供静态文件
 # ============================================================
+class SPAStaticFiles(StaticFiles):
+    """覆盖 StaticFiles 使其不拦截 /api /docs /openapi.json 等路径"""
+    async def get_response(self, path: str, scope):
+        # API路径和文档路径不拦截
+        if path.startswith("api/") or path.startswith("docs") or path.startswith("openapi.json") or path.startswith("redoc"):
+            from starlette.responses import Response
+            return Response(status_code=404)
+        return await super().get_response(path, scope)
+
 for frontend_dist in [
     os.path.join(os.path.dirname(__file__), "frontend", "dist"),
     os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"),
 ]:
     if os.path.isdir(frontend_dist):
-        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+        app.mount("/", SPAStaticFiles(directory=frontend_dist, html=True), name="frontend")
         print(f"[OK] Frontend static files mounted from {frontend_dist}")
         break
