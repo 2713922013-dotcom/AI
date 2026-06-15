@@ -1,0 +1,6 @@
+{
+  "envId": "offer-hunter-d1gabjd633a1e2c4a",
+  "cloudrun": {
+    "name": "offer-hunter-api"
+  }
+}

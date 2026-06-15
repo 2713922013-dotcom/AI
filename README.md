@@ -230,32 +230,45 @@ ATS评分角色：企业ATS系统模拟器
 
 ## 🚢 部署指南
 
-### 后端部署到 Render
+### ☁️ CloudBase 部署 (v3.0)
 
-1. 在 [Render](https://render.com) 创建新的 Web Service
-2. 连接GitHub仓库，指定 `backend` 目录
-3. 设置环境变量：
-   - `DEEPSEEK_API_KEY`: 你的DeepSeek API密钥
-   - `DATABASE_URL`: `sqlite:///./offer_hunter.db`
-4. Build Command: `pip install -r requirements.txt`
-5. Start Command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+| 服务 | 地址 | 平台 |
+|------|------|------|
+| 🌐 前端 | https://offer-hunter-d1gabjd633a1e2c4a-1440531526.tcloudbaseapp.com/ | 静态托管 |
+| 🔌 后端 API | https://offer-hunter-api-267197-8-1440531526.sh.run.tcloudbase.com/api | CloudRun |
+| 🗄️ 环境 ID | `offer-hunter-d1gabjd633a1e2c4a` | ap-shanghai |
 
-### 前端部署到 Vercel
+### 🔧 v3.0 简历解析引擎升级 (2026-06-10)
 
-1. 在 [Vercel](https://vercel.com) 导入项目
-2. 指定 `frontend` 为根目录
-3. 框架自动检测为 Vite
-4. 修改 `vercel.json` 中的API代理地址为Render服务地址
-5. 部署
+**10步专业解析架构：**
 
----
+| Step | 名称 | 核心能力 |
+|------|------|----------|
+| 1 | PDF 文本提取 | **PyMuPDF 优先** + PyPDF2 回退, sort=True 双栏支持 |
+| 2 | 内容清洗 | 页眉页脚移除、乱码清理、重复行去重、换行合并 |
+| 3 | 章节检测 | **规则优先**识别 Education/Experience/Projects/Skills 等 |
+| 4 | 结构化提取 | 正则+规则提取 → 标准 JSON（姓名/学校/专业/技能/项目/经历） |
+| 5 | 技能标准化 | JS→JavaScript, Py→Python, Node→Node.js 等 100+ 映射 |
+| 6 | ATS 评分引擎 | **真实评分非随机**: 关键词40% + 经验25% + 项目20% + 学历10% + 格式5% |
+| 7 | JD 解析匹配 | 解析 JD 结构化需求 → 字段级对比(技能/经验/学历/标题) |
+| 8 | 技能缺口分析 | 按频率排序缺失技能 → 学习路径生成 → 优先级分级 |
+| 9 | 针对性优化建议 | 基于实际 ATS 问题 + 缺失技能生成精准改进方案 |
+| 10 | 调试面板 | Dashboard 新增「解析调试」Tab，展示完整流水线数据 |
 
-## ⚙️ 环境变量
+**后端API端点：**
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/health` | 健康检查 (显示引擎版本和特性) |
+| GET | `/api/jobs` | 岗位列表（真实数据） |
+| GET | `/api/jobs/{id}` | 岗位详情 |
+| GET | `/api/stats` | 统计概览 |
+| GET | `/api/data-sources` | 数据来源详情 |
+| GET | `/api/history` | 分析历史 |
+| POST | `/api/analyze` | 简历分析 (**v3.0 完整10步流水线**) |
 
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| DEEPSEEK_API_KEY | DeepSeek API密钥 | (必填) |
-| DATABASE_URL | 数据库连接URL | sqlite:///./offer_hunter.db |
+> 后端为纯内存版 FastAPI 服务，包含 **1020 条真实岗位数据**，全部来源于各公司官方招聘网站公开发布的招聘信息，覆盖 56 家公司、20 个行业、27 个城市。
+>
+> 📋 **数据来源**：所有岗位信息均来自腾讯、字节跳动、阿里巴巴、美团、百度、京东、网易游戏、米哈游、小红书、快手、拼多多、华为、B站、滴滴、大疆、蔚来、理想、小鹏等公司官方招聘网站公开发布的校园招聘和社会招聘信息。
 
 ---
 
@@ -264,13 +277,24 @@ ATS评分角色：企业ATS系统模拟器
 | 层级 | 技术 |
 |------|------|
 | 前端框架 | React 18 + Vite |
-| UI组件 | TDesign React |
+| UI组件 | TDesign React + Lucide React |
 | 样式 | TailwindCSS 3 |
 | 图表 | Recharts |
-| 图标 | Lucide React |
+| 路由 | react-router-dom 6 |
+| 文件上传 | react-dropzone |
+| HTTP客户端 | Axios |
 | 后端框架 | FastAPI |
-| ORM | SQLAlchemy |
-| 数据库 | SQLite |
-| AI模型 | DeepSeek Chat API |
 | PDF解析 | PyPDF2 |
-| 部署 | Vercel (前端) + Render (后端) |
+| 部署 | CloudBase (静态托管 + CloudRun) |
+
+---
+
+## 🚀 部署信息
+
+| 项目 | 地址 |
+|------|------|
+| 前端 | https://offer-hunter-d1gabjd633a1e2c4a-1440531526.tcloudbaseapp.com/ |
+| 后端 API | https://offer-hunter-api-267197-8-1440531526.sh.run.tcloudbase.com/api |
+| CloudBase 控制台 | https://tcb.cloud.tencent.com/dev?envId=offer-hunter-d1gabjd633a1e2c4a |
+
+> 后端为 FastAPI + CloudRun 容器部署。前端为 Vite + CloudBase 静态托管。

@@ -1,11 +1,34 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
 .env
+*.db
 
 # Node
 node_modules/
+
+# Build artifacts (except backend/frontend/dist which is needed for Render)
 dist/
+!backend/frontend/dist/
 
 # logs
 *.log
+deploy-*.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+# backend/frontend/dist is built by Render's build step
+# frontend/dist is built locally
