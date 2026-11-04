@@ -31,8 +31,8 @@
 │  │                                               └──────────┘   │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 │                                                                     │
-│  数据层: SQLite ◄──► SQLAlchemy ORM                                │
-│  AI引擎: DeepSeek API (deepseek-chat)                              │
+│  数据层: 内存态会话 + 浏览器 localStorage（历史记录）                 │
+│  AI引擎: DeepSeek API (deepseek-chat)，未配置时退回规则引擎          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -135,11 +135,24 @@ npm run dev
 
 ### 3. 使用流程
 
-1. 打开首页，上传PDF简历
+1. 打开首页，上传PDF简历（**必须是有文字层的 PDF**，扫描件会被明确拒绝并提示改法）
 2. 输入目标岗位（如：数据分析师）
 3. 输入目标城市（如：北京）
 4. 点击"开始分析"
 5. 自动跳转到分析仪表盘，查看6大模块结果
+
+### 4. 自检与测试
+
+```bash
+cd backend
+
+# 解析流水线回归测试（扫描件拒绝 / 字段提取 / ATS 边界 / 预测可复现）
+venv/Scripts/python.exe test_pipeline.py     # Windows
+python test_pipeline.py                      # macOS / Linux
+
+# 大模型连通性
+curl http://localhost:8000/api/llm/ping
+```
 
 ---
 
@@ -147,47 +160,45 @@ npm run dev
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | /api/health | 健康检查 |
+| GET | /api/health | 健康检查（引擎版本 + 大模型状态 + 调用统计） |
+| GET | /api/llm/ping | 大模型真实连通性探测 |
 | POST | /api/analyze | 上传简历并执行完整分析 |
 | GET | /api/jobs | 获取岗位列表 |
-| GET | /api/history | 获取分析历史 |
+| GET | /api/jobs/{id} | 岗位详情 |
+| GET | /api/stats | 平台统计概览 |
+| GET | /api/data-sources | 岗位数据来源说明 |
+| GET | /api/history | 获取分析历史（内存态，重启即清空） |
 | GET | /api/history/{session_id} | 获取分析详情 |
+
+**`POST /api/analyze` 的失败响应**（前端据此展示具体改法，不再只报「分析失败」）：
+
+| HTTP | code | 含义 |
+|------|------|------|
+| 400 | 4001 | 上传文件为空 |
+| 422 | 4221 | PDF 读不到正文（扫描件/图片简历/字体乱码），`data.reason` 区分 `no_text` / `too_short` / `garbled` |
+| 500 | -1 | 服务端异常（堆栈只写日志，不外泄） |
 
 ---
 
-## 🗄️ 数据库设计
+## 🗄️ 数据存储
 
-### jobs 表 (岗位数据库)
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INTEGER | 主键 |
-| title | VARCHAR(200) | 岗位名称 |
-| company | VARCHAR(200) | 公司名称 |
-| city | VARCHAR(100) | 城市 |
-| description | TEXT | 岗位描述 |
-| skills_required | TEXT | 技能要求(JSON数组) |
-| education_required | VARCHAR(100) | 学历要求 |
-| salary_min | INTEGER | 最低薪资(K) |
-| salary_max | INTEGER | 最高薪资(K) |
-| industry | VARCHAR(100) | 行业 |
-| experience_required | VARCHAR(100) | 经验要求 |
+当前版本**没有引入数据库**，避免免费实例重启后连接失效。
 
-### analysis_records 表 (分析记录)
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INTEGER | 主键 |
-| session_id | VARCHAR(100) | 会话ID |
-| resume_text | TEXT | 简历原文 |
-| resume_parsed | TEXT | 简历解析结果(JSON) |
-| target_position | VARCHAR(200) | 目标岗位 |
-| target_city | VARCHAR(100) | 目标城市 |
-| matching_result | TEXT | 匹配结果(JSON) |
-| gap_analysis | TEXT | 缺口分析(JSON) |
-| ats_score | TEXT | ATS评分(JSON) |
-| resume_optimized | TEXT | 优化后简历(JSON) |
-| offer_prediction | TEXT | Offer预测(JSON) |
-| status | VARCHAR(50) | 状态 |
-| created_at | DATETIME | 创建时间 |
+| 数据 | 存储位置 | 生命周期 |
+|------|----------|----------|
+| 岗位数据（1020 条） | `backend/job_crawler.py` 内置数据集 | 随代码发布，只读 |
+| 单次分析结果 | 服务进程内存 `ANALYSIS_HISTORY`（最多 50 条） | 服务重启即清空 |
+| 历史记录（趋势对比用） | 浏览器 `localStorage`（`offer-hunter-history`，最多 20 条） | 用户本地，换设备不同步 |
+
+> 历史记录放在浏览器本地是权衡后的选择：Render 免费实例每次重启都会清空磁盘，
+> 服务端存历史反而会「看起来丢了」。等接入 Supabase 后再统一迁到云端。
+
+### 后续规划（Supabase）
+
+| 表 | 用途 |
+|----|------|
+| `analysis_records` | 保存完整分析结果，支持跨设备历史与趋势 |
+| `jobs` | 岗位数据落库，支持后台增删改 |
 
 ---
 
@@ -243,13 +254,37 @@ ATS评分角色：企业ATS系统模拟器
 
 ## 🚢 部署指南
 
-### ☁️ CloudBase 部署 (v3.0)
+### ☁️ 当前线上环境（Render）
+
+| 服务 | 地址 | 说明 |
+|------|------|------|
+| 🌐 应用（前后端同源） | https://offer-hunter-api.onrender.com/ | 单个 Web Service，rootDir = `backend` |
+| 🔌 API 文档 | https://offer-hunter-api.onrender.com/docs | FastAPI 自动生成 |
+| ❤️ 健康检查 | https://offer-hunter-api.onrender.com/api/health | 返回引擎版本与大模型状态 |
+
+**部署路径**：`git push origin main` → Render 自动构建 → 新版本上线（约 2-4 分钟）。
+前端构建产物直接输出到 `backend/frontend/dist`，由 FastAPI 的 SPA 静态托管统一提供，因此**不再需要单独部署前端**。
+
+> Render 免费实例闲置 15 分钟会休眠，首次访问需要 30-60 秒唤醒，属正常现象。
+
+### 📦 历史部署方式（已迁移，仅作记录）
 
 | 服务 | 地址 | 平台 |
 |------|------|------|
-| 🌐 前端 | https://offer-hunter-d1gabjd633a1e2c4a-1440531526.tcloudbaseapp.com/ | 静态托管 |
+| 🌐 前端 | https://offer-hunter-d1gabjd633a1e2c4a-1440531526.tcloudbaseapp.com/ | CloudBase 静态托管 |
 | 🔌 后端 API | https://offer-hunter-api-267197-8-1440531526.sh.run.tcloudbase.com/api | CloudRun |
 | 🗄️ 环境 ID | `offer-hunter-d1gabjd633a1e2c4a` | ap-shanghai |
+
+### 🔧 v3.2 解析健壮性升级 (2026-11-04)
+
+| 改动 | 说明 |
+|------|------|
+| PDF 可用性校验 | 提取不到正文（扫描件/图片简历）直接返回 422 并给出改法，不再产出全 0 分的假报告 |
+| 修复项目相关性崩溃 | `calculate_ats_score` 变量名写错导致有项目的简历直接 500，已修复 |
+| 专业字段纠错 | 「专业技能」标题不再被误识别为专业；新增「学校+专业+学历」同行结构解析 |
+| 经历分段增强 | 支持「小红书」「携程」这类短公司名，按日期行切分，自动拆出公司/职位/时间 |
+| 错误信息脱敏 | 异常不再把 Python 堆栈返回给浏览器 |
+| 回归测试 | 新增 `backend/test_pipeline.py`，6 项断言覆盖上述问题 |
 
 ### 🔧 v3.0 简历解析引擎升级 (2026-06-10)
 
@@ -297,8 +332,9 @@ ATS评分角色：企业ATS系统模拟器
 | 文件上传 | react-dropzone |
 | HTTP客户端 | Axios |
 | 后端框架 | FastAPI |
-| PDF解析 | PyPDF2 |
-| 部署 | CloudBase (静态托管 + CloudRun) |
+| PDF解析 | PyMuPDF（优先）+ PyPDF2（回退） |
+| 大模型 | DeepSeek / 任意 OpenAI 兼容端点（可开关） |
+| 部署 | Render 单 Web Service（FastAPI 同时托管前端） |
 
 ---
 
@@ -306,8 +342,8 @@ ATS评分角色：企业ATS系统模拟器
 
 | 项目 | 地址 |
 |------|------|
-| 前端 | https://offer-hunter-d1gabjd633a1e2c4a-1440531526.tcloudbaseapp.com/ |
-| 后端 API | https://offer-hunter-api-267197-8-1440531526.sh.run.tcloudbase.com/api |
-| CloudBase 控制台 | https://tcb.cloud.tencent.com/dev?envId=offer-hunter-d1gabjd633a1e2c4a |
+| 应用入口（含前端） | https://offer-hunter-api.onrender.com/ |
+| API 文档 | https://offer-hunter-api.onrender.com/docs |
+| 代码仓库 | https://github.com/2713922013-dotcom/AI |
 
-> 后端为 FastAPI + CloudRun 容器部署。前端为 Vite + CloudBase 静态托管。
+> 后端为 FastAPI，前端构建产物由同一服务托管，因此前后端同源、无跨域问题。

@@ -2,10 +2,11 @@
 Offer Hunter Backend - v3.0 专业级简历解析引擎
 10步解析架构: PDF→文本提取→OCR兜底→内容清洗→结构化解析→ATS标准化→JD匹配分析
 """
-import io, re, random, uuid, json, os
+import io, re, uuid, json, os, traceback
 from datetime import datetime
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 # 优先使用 PyMuPDF (fitz)，回退到 PyPDF2
@@ -160,11 +161,15 @@ def extract_pdf_text(pdf_bytes):
     Step 1: 文本提取
     - 优先 PyMuPDF: 更好的中文支持、双栏处理、乱码恢复
     - 回退 PyPDF2: 基础提取
-    - OCR 兜底: 当文本长度 < 阈值时标记需要 OCR
+    - 可用性判定: 提取不到正文时明确标记不可用，由调用方决定是否终止
+      （扫描件/图片型简历没有文本层，硬跑下去只会产出全是 0 分的假报告）
     """
-    extraction_info = {"method": "", "pages": 0, "char_count": 0, "needs_ocr": False}
+    extraction_info = {
+        "method": "", "pages": 0, "char_count": 0,
+        "needs_ocr": False, "usable": False, "reason": "",
+    }
     text = ""
-    
+
     try:
         if HAS_PYMUPDF:
             doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -185,20 +190,34 @@ def extract_pdf_text(pdf_bytes):
                     text += t + "\n"
     except Exception as e:
         extraction_info["method"] = f"Error: {str(e)}"
+        extraction_info["usable"] = False
+        extraction_info["needs_ocr"] = True
+        extraction_info["reason"] = "parse_error"
         return f"[提取失败: {e}]", extraction_info
-    
-    extraction_info["char_count"] = len(text)
-    # 判断是否为扫描版：中文字符占比低或总字符太少
-    chinese_chars = re.sub(r'[^\u4e00-\u9fff]', '', text)
-    total_printable = re.sub(r'\s+', '', text)
-    
-    if len(text) < 100 or (len(total_printable) > 50 and len(chinese_chars)/len(total_printable) < 0.15):
+
+    # 只统计非空白字符，避免排版空格撑起长度
+    stripped = re.sub(r'\s+', '', text)
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+    latin_words = len(re.findall(r'[A-Za-z]{2,}', text))
+
+    extraction_info["char_count"] = len(stripped)
+    extraction_info["chinese_chars"] = chinese_chars
+    extraction_info["latin_words"] = latin_words
+
+    # 判定标准：正文要有一定长度，且中文或英文词达到下限
+    # 用「中文或英文词」而非「中文占比」，否则纯英文简历会被误判为扫描件
+    usable = len(stripped) >= 80 and (chinese_chars >= 20 or latin_words >= 12)
+    extraction_info["usable"] = usable
+
+    if not usable:
         extraction_info["needs_ocr"] = True
-    
-    if not text.strip():
-        text = "[简历内容无法自动提取，可能为扫描版PDF]"
-        extraction_info["needs_ocr"] = True
-    
+        if not stripped:
+            extraction_info["reason"] = "no_text"       # 完全没有文本层 → 扫描件
+        elif len(stripped) < 80:
+            extraction_info["reason"] = "too_short"     # 只有零星文字（水印/页码）
+        else:
+            extraction_info["reason"] = "garbled"       # 有文字但不成句（字体编码损坏）
+
     return text, extraction_info
 
 
@@ -392,6 +411,60 @@ def detect_sections(cleaned_text):
 # ============================================================
 # Step 4: 结构化简历提取（正则+规则为主）
 # ============================================================
+DATE_RANGE_RE = re.compile(
+    r'((?:19|20)\d{2}\s*[.\-/年]\s*\d{1,2}\s*月?\s*[-–—~～至到]\s*'
+    r'(?:(?:19|20)\d{2}\s*[.\-/年]\s*\d{1,2}\s*月?|至今|现在|今))'
+)
+POSITION_HINTS = (
+    '实习生', '工程师', '经理', '助理', '专员', '主管', '总监', '设计师',
+    '分析师', '运营', '开发', '研究员', '顾问', '策划', '编辑', '测试',
+    '架构师', '负责人', '产品经理', '销售', '实习',
+)
+
+
+def parse_exp_header(header):
+    """
+    从「2024.06 - 2024.12  小红书  产品运营实习生」这类首行里拆出时间/公司/职位。
+    中文简历排版五花八门，这里按优先级逐层降级，拆不出来就留空交给调用方兜底。
+    """
+    rec = {}
+    rest = header
+    m = DATE_RANGE_RE.search(header)
+    if m:
+        rec["time_range"] = re.sub(r'\s+', '', m.group(1))
+        rest = (header[:m.start()] + ' ' + header[m.end():]).strip()
+
+    rest = rest.strip(' -–—|｜·•\t')
+    parts = [p.strip() for p in re.split(r'\s{2,}|[|｜·•]|\t', rest) if p.strip()]
+    if not parts:
+        return rec
+
+    # PDF 提取的文字经常只有单空格，先按单空格再拆一次
+    if len(parts) == 1 and ' ' in parts[0]:
+        tokens = parts[0].split()
+        pos_idx = next((i for i in range(len(tokens) - 1, 0, -1)
+                        if any(h in tokens[i] for h in POSITION_HINTS)), None)
+        if pos_idx is not None:
+            rec["company"] = ' '.join(tokens[:pos_idx])
+            rec["position"] = ' '.join(tokens[pos_idx:])
+            return rec
+        parts = tokens
+
+    # 含职位关键词的那段当职位，其余当公司
+    pos_idx = next((i for i, p in enumerate(parts) if any(h in p for h in POSITION_HINTS)), None)
+    if pos_idx is not None:
+        rec["position"] = parts[pos_idx]
+        others = [p for i, p in enumerate(parts) if i != pos_idx]
+        if others:
+            rec["company"] = others[0]
+    elif len(parts) >= 2:
+        rec["company"], rec["position"] = parts[0], parts[1]
+    else:
+        rec["company"] = parts[0]
+
+    return rec
+
+
 def structured_extract(cleaned_text, sections_result, target_position=""):
     """
     Step 4: 结构化提取 — 正则+规则为主，输出标准 JSON
@@ -514,17 +587,35 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
         if len(mj) <= 4:
             short_major_names.add(mj)
     
+    # 「专业」在中文简历里经常是标题词（专业技能 / 专业课程），只认带分隔符的写法
     major_patterns = [
-        r'(?:专业|Major|主修|所学)[：:\s]*([^\s\n,，;；]{2,20})',
-        r'(?:本科|学士|硕士|博士)(?:[^。\n]{0,40}?)(?:专业|方向|系)[：:\s]*([^\s\n,，;；]{2,20})',
+        r'(?:所学专业|主修专业|专业名称|就读专业|专业)[：:]\s*([^\s\n,，;；]{2,20})',
+        r'(?:专业|主修|所学)(?:是|为)[：:\s]*([^\s\n,，;；]{2,20})',
+        r'(?:本科|学士|硕士|博士|专科)(?:[^。\n]{0,40}?)(?:专业|方向|系)[：:\s]*([^\s\n,，;；]{2,20})',
     ]
+    # 以这些词开头的不是专业名（多半是标题或栏目名）
+    major_bad_prefix = ('技能', '课程', '课', '知识', '能力', '素质', '背景', '方向',
+                        '要求', '排名', '实践', '证书', '英语', '培训', '经历', '项目')
     for p in major_patterns:
         m = re.search(p, text)
         if m and m.group(1):
-            maj = m.group(1).strip()
-            if len(maj) >= 2 and not any(kw in maj for kw in major_exclude_keywords):
+            maj = m.group(1).strip().strip('：:')
+            if len(maj) >= 2 and not maj.startswith(major_bad_prefix) \
+                    and not any(kw in maj for kw in major_exclude_keywords):
                 info["major"] = maj
                 break
+
+    # 教育行结构：学校 + 专业 + 学历 写在同一行（中文简历最常见的排版）
+    if not info["major"]:
+        edu_line = re.search(
+            r'(?:大学|学院|学校)[\s　]+([^\s\n,，|｜]{2,20})[\s　]+'
+            r'(?:本科|学士|硕士|博士|研究生|专科|大专)',
+            text
+        )
+        if edu_line:
+            cand = edu_line.group(1).strip()
+            if len(cand) >= 2 and not cand.startswith(major_bad_prefix):
+                info["major"] = cand
     
     # 从专业列表直接匹配（仅限于学校/教育上下文中）
     if not info["major"]:
@@ -701,28 +792,44 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
     
     if exp_section:
         exp_content = exp_section['content']
-        exp_blocks = re.split(r'\n(?=\S{2,}(?:有限公司|集团|科技|网络|互联网|银行|证券|基金|咨询|教育|媒体))', exp_content)
-        for block in exp_blocks[:5]:
-            rec = {}
-            try:
+        # 切块：以「日期开头」或「公司名常见结尾」开头的行为分隔点
+        # 不能只认「XX有限公司」——校招简历里多是「小红书」「携程」这种短名
+        exp_blocks = re.split(
+            r'\n(?=(?:(?:19|20)\d{2}\s*[.\-/年]'
+            r'|\S{2,}(?:有限公司|集团|科技|网络|互联网|银行|证券|基金|咨询|教育|媒体|医院|研究院|中心)))',
+            exp_content
+        )
+        for block in exp_blocks:
+            if not block.strip():
+                continue
+            lines = [l.strip() for l in block.strip().split('\n') if l.strip()]
+            if not lines:
+                continue
+            rec = parse_exp_header(lines[0])
+
+            # 首行没拆出来时，退回旧的关键词提取
+            if not rec.get("company"):
                 company_m = re.search(r'([\u4e00-\u9fff\w]{2,25}(?:有限公司|集团|科技|网络|互联网|银行|证券|基金|咨询|教育|媒体|医院|研究院|所|中心))', block)
-                if company_m: rec["company"] = company_m.group(1)
-            except: pass
-            try:
+                if company_m:
+                    rec["company"] = company_m.group(1)
+            if not rec.get("position"):
                 title_m = re.search(r'(?:岗位|职位|职务|担任|任)[：:\s]*([^\s\n,，;；]{2,20})', block)
-                if title_m: rec["position"] = title_m.group(1)
-            except: pass
-            try:
-                time_m = re.search(r'((?:19|20)\d{2}\s*[-–—~～]\s*(?:19|20)?\d{2}|(?:19|20)\d{2}\.\d{1,2}\s*[-–—~～])', block)
-                if time_m: rec["time_range"] = time_m.group(0)
-            except: pass
-            
-            desc_lines = [l for l in block.split('\n') if len(l) > 8 and not re.match(r'^[\s\d\-–—:.年月日]*$', l)]
+                if title_m:
+                    rec["position"] = title_m.group(1)
+            if not rec.get("time_range"):
+                time_m = DATE_RANGE_RE.search(block)
+                if time_m:
+                    rec["time_range"] = re.sub(r'\s+', '', time_m.group(1))
+
+            desc_lines = [l for l in lines[1:] if len(l) > 8 and not re.match(r'^[\s\d\-–—:.年月日]*$', l)]
             if desc_lines:
                 rec["description"] = '\n'.join(desc_lines[:4])
-                
-            if rec:
+
+            # 只有公司/职位/时间任一命中才算一条经历，避免空块污染
+            if rec.get("company") or rec.get("position") or rec.get("time_range"):
                 info["experience_records"].append(rec)
+            if len(info["experience_records"]) >= 6:
+                break
     
     # ---- 项目记录 ----
     proj_section = None
@@ -733,12 +840,26 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
     
     if proj_section:
         proj_content = proj_section['content']
-        proj_blocks = re.split(r'\n(?=\S{2,}(?:项目|系统|平台|APP|网站|小程序|模块|工具|算法|模型))', proj_content)
+        proj_blocks = re.split(
+            r'\n(?=(?:(?:19|20)\d{2}\s*[.\-/年]'
+            r'|\S{2,}(?:项目|系统|平台|APP|网站|小程序|模块|工具|算法|模型)))',
+            proj_content
+        )
         for block in proj_blocks[:5]:
+            if not block.strip():
+                continue
             rec = {}
-            name_m = re.search(r'^(.{2,40}(?:项目|系统|平台|APP|网站|小程序|模块|工具|算法|模型|服务))', block)
-            if name_m: rec["name"] = name_m.group(1)
-            
+            lines = [l.strip() for l in block.strip().split('\n') if l.strip()]
+            header = lines[0] if lines else ''
+            time_m = DATE_RANGE_RE.search(header)
+            if time_m:
+                rec["time_range"] = re.sub(r'\s+', '', time_m.group(1))
+                header = (header[:time_m.start()] + ' ' + header[time_m.end():]).strip(' -–—|｜')
+            # 项目名：首行里去掉日期后，取第一段
+            name_parts = [p for p in re.split(r'\s{2,}|[|｜·•]', header) if p.strip()]
+            if name_parts:
+                rec["name"] = name_parts[0][:40]
+
             role_m = re.search(r'(?:角色|职责|负责|担任|参与)[：:\s]*([^\n\r]{2,30})', block)
             if role_m: rec["role"] = role_m.group(1)
             
@@ -748,7 +869,7 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
                     tech_stack.add(normalize_skill(kw))
             if tech_stack: rec["tech_stack"] = sorted(list(tech_stack))[:8]
             
-            desc_lines = [l for l in block.split('\n') if len(l) > 10 and not re.match(r'^[\s\d\-–—:.年月日]*$', l)]
+            desc_lines = [l for l in lines[1:] if len(l) > 10 and not re.match(r'^[\s\d\-–—:.年月日]*$', l)]
             if desc_lines:
                 rec["description"] = '\n'.join(desc_lines[:4])
             
@@ -851,21 +972,35 @@ def calculate_ats_score(parsed_info, target_position, job_skills_required=None):
     # --- 项目相关性 (20分) ---
     project_relevance = 0
     if projects:
+        # 目标岗位关键词标准化后只算一次，避免每个项目重复计算
+        job_skills = {normalize_skill(pkw) for pkw in position_kw_list}
+        job_skills.discard(None)
+
         relevant_count = 0
         for proj in projects:
-            proj_str = str(proj).lower()
-            proj_tech = set(proj.get('tech_stack', []) or [])
-            # 检查是否与目标岗位相关
+            tech_stack = proj.get('tech_stack') or []
+            # 只用项目自身的文本做匹配，不要 str(整个 dict)（会把键名当成内容）
+            proj_str = " ".join([
+                str(proj.get('name') or ''),
+                str(proj.get('role') or ''),
+                str(proj.get('description') or ''),
+                " ".join(str(t) for t in tech_stack),
+            ]).lower()
+
             relevance_signals = 0
             for pkw in position_kw_list[:3]:
-                if pkw.lower() in proj_str or (normalize_skill(pkw) and normalize_skill(pkw).lower() in proj_str):
+                norm = normalize_skill(pkw)
+                if pkw.lower() in proj_str or (norm and norm.lower() in proj_str):
                     relevance_signals += 1
-            # 检查技能重叠
-            tech_overlap = proj_tech & {normalize_skill(pk) for pkw in position_kw_list if normalize_skill(pkw)}
-            relevance_signals += len(tech_overlap)
+
+            # 技能重叠：项目技术栈 ∩ 岗位技能
+            proj_tech = {normalize_skill(t) for t in tech_stack}
+            proj_tech.discard(None)
+            relevance_signals += len(proj_tech & job_skills)
+
             if relevance_signals >= 1:
                 relevant_count += 1
-        
+
         if total_exp_items > 0:
             project_relevance = int(relevant_count / max(total_exp_items, 1) * 16) + min(total_exp_items, 4)
     else:
@@ -1470,11 +1605,12 @@ async def health():
     llm_info = llm.health()
     return {
         "status": "ok",
-        "message": "Offer Hunter API v3.1 — LLM-Enhanced Resume Intelligence",
-        "engine_version": "3.1.0",
-        "features": ["PyMuPDF Extraction", "Content Cleaning", "Rule-Based Section Detection",
-                     "Skill Normalization", "Real ATS Scoring", "Field-Level Job Matching",
-                     "LLM Resume Parsing", "LLM Resume Rewrite", "LLM Career Coaching"],
+        "message": "Offer Hunter API v3.2 — LLM-Enhanced Resume Intelligence",
+        "engine_version": "3.2.0",
+        "features": ["PyMuPDF Extraction", "Content Cleaning", "PDF Usability Guard",
+                     "Rule-Based Section Detection", "Skill Normalization", "Real ATS Scoring",
+                     "Field-Level Job Matching", "LLM Resume Parsing", "LLM Resume Rewrite",
+                     "LLM Career Coaching"],
         "job_count": len(JOBS_DATA),
         "has_pymupdf": HAS_PYMUPDF,
         "llm": {
@@ -1758,13 +1894,52 @@ async def analyze_resume(
         
         # ===== Step 1: PDF 文本提取 =====
         pdf_content = await file.read()
+        if not pdf_content:
+            return JSONResponse(status_code=400, content={
+                "code": 4001,
+                "message": "上传的文件是空的，请重新选择 PDF 简历",
+                "data": None,
+            })
+
         raw_pdf_text, extraction_info = extract_pdf_text(pdf_content)
-        log_step("PDF Extractor", "文本提取", 
+        log_step("PDF Extractor", "文本提取",
                  f"方式={extraction_info['method']} | 页数={extraction_info['pages']} | "
-                 f"字符数={extraction_info['char_count']} | 需OCR={'是' if extraction_info['needs_ocr'] else '否'}")
-        
-        if not raw_pdf_text.strip() or raw_pdf_text.startswith("["):
-            raw_pdf_text = "[简历内容解析中，使用智能分析模式]"
+                 f"字符数={extraction_info['char_count']} | 可用={'是' if extraction_info['usable'] else '否'}")
+
+        # 提取不到正文就直接终止：硬跑下去只会产出一份全是 0 分的假报告
+        if not extraction_info["usable"]:
+            log_step("PDF Extractor", "可用性校验",
+                     "未提取到可用文本，终止分析", status="failed")
+            reason = extraction_info.get("reason")
+            hints = {
+                "no_text": [
+                    "这份 PDF 没有文字层，大概率是扫描件或图片导出的简历",
+                    "用 Word / WPS 打开后「另存为 PDF」，或把内容复制到新文档重新导出",
+                    "导出的 PDF 里文字要能用鼠标选中，才算可解析",
+                ],
+                "too_short": [
+                    "只提取到零星文字，正文可能被排版转成了图片",
+                    "请确认简历正文是可选中的文字，而不是截图",
+                ],
+                "garbled": [
+                    "文字提取出来了但不成句，通常是字体编码或文档加密导致",
+                    "尝试用「打印 → 另存为 PDF」重新导出，避免使用特殊字体或加密",
+                ],
+                "parse_error": [
+                    "PDF 文件可能已损坏或被加密，无法读取",
+                    "请重新导出，或换一份 PDF 简历",
+                ],
+            }.get(reason, ["请更换一份正文可复制的 PDF 简历"])
+            return JSONResponse(status_code=422, content={
+                "code": 4221,
+                "message": "没能从这份 PDF 里读到简历正文，分析已停止（以免给你一份错误报告）",
+                "data": {
+                    "type": "needs_ocr",
+                    "reason": reason,
+                    "extraction": extraction_info,
+                    "hints": hints,
+                },
+            })
         
         # ===== Step 2: 内容清洗 =====
         cleaned_text = clean_resume_text(raw_pdf_text)
@@ -2041,8 +2216,13 @@ async def analyze_resume(
         return {"code": 0, "data": analysis_result, "message": "分析完成"}
 
     except Exception as e:
-        import traceback
-        return {"code": -1, "message": f"分析失败: {str(e)}\n{traceback.format_exc()}"}
+        # 堆栈只写服务端日志，不回传给浏览器
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={
+            "code": -1,
+            "message": f"分析过程出现异常（{type(e).__name__}），请稍后重试或换一份 PDF",
+            "data": None,
+        })
 
 
 def generate_strengths(parsed, ats, gap):

@@ -358,6 +358,7 @@ const HomePage = ({ onAnalysisComplete }) => {
   const [city, setCity] = useState('')
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState(null)
+  const [error, setError] = useState(null)
   const [detailFeature, setDetailFeature] = useState(null)
   const [statsData, setStatsData] = useState(DEFAULT_STATS)
 
@@ -386,7 +387,10 @@ const HomePage = ({ onAnalysisComplete }) => {
   }
 
   const onDrop = useCallback((acceptedFiles) => {
-    if (acceptedFiles.length > 0) setFile(acceptedFiles[0])
+    if (acceptedFiles.length > 0) {
+      setFile(acceptedFiles[0])
+      setError(null)
+    }
   }, [])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -398,6 +402,7 @@ const HomePage = ({ onAnalysisComplete }) => {
 
   const handleAnalyze = async () => {
     if (!file || !position || !city) return
+    setError(null)
     setLoading(true)
     setProgress({ label: '正在上传简历...', progress: 5 })
     try {
@@ -405,8 +410,14 @@ const HomePage = ({ onAnalysisComplete }) => {
       sessionStorage.setItem('analysis_data', JSON.stringify(data))
       onAnalysisComplete(data)
       setTimeout(() => navigate('/dashboard'), 50)
-    } catch (error) {
-      alert('分析失败：' + (error.response?.data?.message || error.message))
+    } catch (err) {
+      // 不用 alert：把后端给的原因和改进建议直接显示在按钮下方
+      const payload = err.response?.data
+      setError({
+        message: payload?.message || err.message || '分析失败，请稍后重试',
+        hints: payload?.data?.hints || [],
+        isOcr: payload?.data?.type === 'needs_ocr',
+      })
     } finally {
       setLoading(false)
     }
@@ -861,6 +872,35 @@ const HomePage = ({ onAnalysisComplete }) => {
                   </>
                 )}
               </button>
+
+              {/* 错误提示：把后端拒绝原因与改进建议直接展示，不再弹 alert */}
+              {error && (
+                <div className="mt-4 rounded-2xl p-4 text-left"
+                  style={{ background: 'rgba(255,138,76,0.08)', border: '1px solid rgba(255,138,76,0.22)' }}>
+                  <div className="flex items-start gap-2.5">
+                    <XCircle className="w-4 h-4 mt-0.5 shrink-0" style={{ color: '#FF9A63' }} />
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold leading-relaxed" style={{ color: '#FFB088' }}>{error.message}</p>
+                      {error.hints.length > 0 && (
+                        <ul className="mt-2.5 space-y-1.5">
+                          {error.hints.map((hint, i) => (
+                            <li key={i} className="text-xs leading-relaxed flex gap-1.5"
+                              style={{ color: 'rgba(255,255,255,0.45)' }}>
+                              <span style={{ color: 'rgba(255,154,99,0.6)' }}>{i + 1}.</span>
+                              <span>{hint}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {error.isOcr && (
+                        <p className="text-xs mt-2.5" style={{ color: 'rgba(255,255,255,0.3)' }}>
+                          提示：能选中文字的 PDF 才能被解析，扫描件需要先做文字识别（OCR）。
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Progress bar */}
               {loading && progress && (

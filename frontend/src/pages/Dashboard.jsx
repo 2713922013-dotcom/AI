@@ -19,6 +19,7 @@ import {
   CartesianGrid, Tooltip, Cell, PieChart as RePieChart, Pie,
   Legend, AreaChart, Area, LineChart, Line
 } from 'recharts'
+import { saveAnalysis, getPrevious } from '../services/history'
 
 // ============================================================
 // 工具函数 — Dark Theme Colors
@@ -572,6 +573,17 @@ const Dashboard = ({ data: rawData }) => {
     }
   }, [rawData])
 
+  // 落盘本次分析，供下次做「较上次」对比
+  useEffect(() => {
+    if (data) saveAnalysis(data)
+  }, [data?.session_id])
+
+  // 上次分析快照（无记录时为 null，趋势标签自动隐藏）
+  const prevSnapshot = useMemo(
+    () => (data?.session_id ? getPrevious(data.session_id) : null),
+    [data?.session_id]
+  )
+
   // ===== 空状态设计 — AI 机器人插画 + 蓝紫光晕 =====
   if (!data) {
     return (
@@ -644,12 +656,13 @@ const Dashboard = ({ data: rawData }) => {
 
   // ... rest of Dashboard with data ...
   
-  const historyData = useMemo(()=>({
-    ats_score:{current:data?.ats_score?.total_score||0,previous:62},
-    interview_probability:{current:data?.offer_prediction?.interview_probability||0,previous:45},
-    offer_probability:{current:data?.offer_prediction?.offer_probability||0,previous:28},
-    matched_jobs:{current:data?.matched_jobs?.length||0,previous:3},
-  }),[data])
+  // 趋势对比：优先用真实的上次分析记录，没有记录则不显示
+  const historyData = {
+    ats_score: { current: data?.ats_score?.total_score || 0, previous: prevSnapshot?.ats_score },
+    interview_probability: { current: data?.offer_prediction?.interview_probability || 0, previous: prevSnapshot?.interview_probability },
+    offer_probability: { current: data?.offer_prediction?.offer_probability || 0, previous: prevSnapshot?.offer_probability },
+    matched_jobs: { current: data?.matched_jobs?.length || 0, previous: prevSnapshot?.matched_jobs },
+  }
 
   const tabs=[
     {id:'overview',label:'总览',icon:BarChart3},{id:'jobs',label:'岗位推荐',icon:Briefcase},
@@ -1076,7 +1089,7 @@ const Dashboard = ({ data: rawData }) => {
       </div>
 
       {/* Detail modal */}
-      {showDetailModal&&(<div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={()=>setShowDetailModal(null)}><div className="glass-card max-w-lg w-full p-6 shadow-glass" onClick={e=>e.stopPropagation()}>
+      {showDetailModal&&(<div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-start sm:items-center justify-center p-4 overflow-y-auto overscroll-contain" onClick={()=>setShowDetailModal(null)}><div className="glass-card max-w-lg w-full max-h-[85vh] overflow-y-auto p-6 my-auto shadow-glass" onClick={e=>e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4"><h3 className="font-semibold text-white/85 text-lg">详细解析</h3><button onClick={()=>setShowDetailModal(null)} className="p-1 hover:bg-white/[0.06] rounded-lg"><XCircle className="w-5 h-5 text-white/35"/></button></div>
         {showDetailModal==='jobs'&&(<div className="space-y-4"><p className="text-sm text-white/50">AI 根据简历内容从岗位库中智能匹配的结果。</p>
           <div className="glass-card p-4"><h4 className="text-sm font-semibold text-secondary/80 mb-2">如何提升匹配数量？</h4>
