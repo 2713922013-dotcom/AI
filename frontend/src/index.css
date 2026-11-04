@@ -280,6 +280,17 @@ body {
   border-color: var(--border-default);
 }
 
+/* overflow 覆盖：.glass-card 默认 overflow:hidden 会裁掉联想下拉框和弹窗滚动区，
+   这里用双类选择器提高优先级，确保组件上的 overflow 工具类真正生效 */
+.glass-card.overflow-visible {
+  overflow: visible;
+}
+.glass-card.overflow-y-auto {
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch; /* 移动端惯性滚动 */
+}
+
 /* Glass navbar */
 .glass-nav {
   background: rgba(5, 8, 22, 0.75);

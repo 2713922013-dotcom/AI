@@ -279,8 +279,9 @@ function AutocompleteInput({
             background: 'rgba(22,22,28,0.97)',
             border: '1px solid rgba(255,255,255,0.08)',
             backdropFilter: 'blur(16px)',
-            maxHeight: '280px',
+            maxHeight: 'min(280px, 40vh)', /* 小屏不占满整屏，避免遮住输入区 */
             overflowY: 'auto',
+            WebkitOverflowScrolling: 'touch',
           }}
         >
           {/* 匹配结果 */}
@@ -751,7 +752,7 @@ const HomePage = ({ onAnalysisComplete }) => {
           </ScrollReveal>
 
           <ScrollReveal delay={200}>
-            <div className="glass-card p-8 md:p-10">
+            <div className="glass-card p-8 md:p-10 overflow-visible">
               {/* Upload area */}
               <div className="mb-8">
                 <label className="flex items-center gap-2 text-sm font-semibold mb-4" style={{ color: 'rgba(255,255,255,0.55)' }}>
