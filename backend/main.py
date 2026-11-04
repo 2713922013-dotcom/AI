@@ -19,6 +19,13 @@ except ImportError:
 # 导入真实岗位数据
 from job_crawler import get_real_jobs, get_data_source_report
 
+# 大模型推理层（未配置密钥时全部返回 None，自动回退规则引擎）
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+import llm
+import llm_agents
+
 app = FastAPI(title="Offer Hunter API", version="3.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -1460,14 +1467,39 @@ def generate_improvement_plan(parsed_info, gap_analysis, target_position, ats_re
 # ============================================================
 @app.get("/api/health")
 async def health():
+    llm_info = llm.health()
     return {
         "status": "ok",
-        "message": "Offer Hunter API v3.0 — Professional Resume Parser",
-        "engine_version": "3.0.0",
+        "message": "Offer Hunter API v3.1 — LLM-Enhanced Resume Intelligence",
+        "engine_version": "3.1.0",
         "features": ["PyMuPDF Extraction", "Content Cleaning", "Rule-Based Section Detection",
-                     "Skill Normalization", "Real ATS Scoring", "Field-Level Job Matching"],
+                     "Skill Normalization", "Real ATS Scoring", "Field-Level Job Matching",
+                     "LLM Resume Parsing", "LLM Resume Rewrite", "LLM Career Coaching"],
         "job_count": len(JOBS_DATA),
         "has_pymupdf": HAS_PYMUPDF,
+        "llm": {
+            "configured": llm_info["enabled"],
+            "model": llm_info["model"],
+            "calls": llm_info["calls"],
+            "success": llm_info["success"],
+            "failed": llm_info["failed"],
+            "avg_latency_ms": llm_info["avg_latency_ms"],
+            "last_error": llm_info["last_error"],
+        },
+    }
+
+
+@app.get("/api/llm/ping")
+async def llm_ping():
+    """真实探测大模型连通性，用于部署后自检"""
+    if not llm.is_enabled():
+        return {"code": -1, "message": "未配置大模型密钥，当前运行在规则引擎模式", "engine": llm.health()}
+    result = llm.ping()
+    return {
+        "code": 0 if result["ok"] else -1,
+        "message": "大模型连通正常" if result["ok"] else "大模型调用失败",
+        "data": result,
+        "engine": llm.health(),
     }
 
 
@@ -1518,6 +1550,187 @@ ANALYSIS_HISTORY = []
 
 
 # ============================================================
+# LLM 结果合并 — 模型结果优先，保留规则引擎已识别的内容
+# ============================================================
+def merge_llm_parsed(parsed_info, llm_parsed):
+    """
+    把大模型的结构化解析结果合并进规则解析结果。
+    策略：
+      - 标量字段（姓名/学校/专业/学历等）：模型给出非空值则覆盖，模型读全文更准
+      - 技能：取并集并标准化，避免遗漏
+      - 项目/实习记录：模型结果非空则替换，否则保留规则提取
+    """
+    if not llm_parsed:
+        return parsed_info, 0
+
+    filled = 0
+    for field in ("name", "email", "phone", "location", "school", "major",
+                  "education", "graduation_year", "gpa", "self_evaluation"):
+        value = (llm_parsed.get(field) or "").strip()
+        if value:
+            if parsed_info.get(field) != value:
+                filled += 1
+            parsed_info[field] = value
+
+    merged_skills = list(parsed_info.get("skills") or [])
+    seen = {str(s).strip().lower() for s in merged_skills}
+    for raw in (llm_parsed.get("skills") or []):
+        key = str(raw).strip().lower()
+        if not key or key in seen:
+            continue
+        normalized = normalize_skill(raw) or raw
+        if normalized.strip().lower() in seen:
+            continue
+        merged_skills.append(normalized)
+        seen.add(normalized.strip().lower())
+    parsed_info["skills"] = merged_skills[:30]
+
+    for field in ("certifications", "languages", "awards"):
+        existing = list(parsed_info.get(field) or [])
+        low = {str(x).strip().lower() for x in existing}
+        for item in (llm_parsed.get(field) or []):
+            if str(item).strip().lower() not in low:
+                existing.append(item)
+                low.add(str(item).strip().lower())
+        parsed_info[field] = existing[:12]
+
+    if llm_parsed.get("project_records"):
+        parsed_info["project_records"] = llm_parsed["project_records"]
+    if llm_parsed.get("experience_records"):
+        parsed_info["experience_records"] = llm_parsed["experience_records"]
+
+    return parsed_info, filled
+
+
+# ============================================================
+# 确定性 Offer 预测 — 替代原 random.randint
+# ============================================================
+def deterministic_forecast(parsed_info, ats_result, gap_analysis, matched_jobs):
+    """
+    完全基于真实指标的预测模型，同样输入必然得到同样输出。
+    维度：ATS 总分、技能覆盖率、岗位平均匹配度、命中岗位数、项目/经验得分。
+    """
+    dimensions = ats_result.get("dimensions") or []
+
+    def dim(index, default=0.0):
+        try:
+            return float(dimensions[index].get("score", default) or default)
+        except (IndexError, AttributeError, TypeError, ValueError):
+            return default
+
+    total = float(ats_result.get("total_score", 0) or 0)
+    strength_only = total  # 保留原值用于返回
+    keyword, experience, project, education, fmt = dim(0), dim(1), dim(2), dim(3), dim(4)
+
+    coverage = float((gap_analysis.get("stats") or {}).get("coverage_pct", 0) or 0)
+    matched_count = len(matched_jobs or [])
+    top_jobs = (matched_jobs or [])[:10]
+    avg_match = sum(float(j.get("match_score", 0) or 0) for j in top_jobs) / max(len(top_jobs), 1)
+
+    # 面试概率：ATS 占一半权重，其余由覆盖率、岗位匹配度、命中岗位数决定
+    interview = (
+        total * 0.50
+        + coverage * 0.25
+        + avg_match * 0.15
+        + min(matched_count, 10) * 0.60
+    )
+    # 项目经验是校招最有效的差异化项，单独加权
+    interview += project * 0.15
+    # 学历加成（仅作微调，避免学历决定论）
+    education_level = parsed_info.get("education", "")
+    interview += {"博士": 3.0, "硕士": 2.0, "本科": 0.0, "专科": -3.0}.get(education_level, -1.0)
+    # 经验描述几乎为空时明显打折
+    if experience < 8:
+        interview -= 6.0
+    interview = int(round(max(12, min(interview, 96))))
+
+    offer = interview * 0.45 + project * 1.10 + min(len(parsed_info.get("skills") or []), 12) * 0.30
+    offer = int(round(max(6, min(offer, interview - 7))))
+
+    competitiveness = int(round(max(10, min(0.45 * total + 0.35 * coverage + 0.20 * avg_match, 97))))
+
+    edu_score = {
+        "博士": 92, "硕士": 85, "本科": 72, "专科": 56,
+    }.get(education_level, 48)
+    edu_score = int(min(97, edu_score + min(education, 10) * 0.6))
+
+    radar = [
+        {"name": "学历背景", "score": edu_score},
+        {"name": "技能匹配", "score": int(min(96, 34 + coverage * 0.62))},
+        {"name": "项目经验", "score": int(min(96, 32 + project * 2.9))},
+        {"name": "行业竞争力", "score": int(min(94, 28 + avg_match * 0.72))},
+        {"name": "发展潜力", "score": int(min(93, 42
+                                            + min(len(parsed_info.get("skills") or []), 15) * 1.6
+                                            + min(len(parsed_info.get("project_records") or []), 5) * 3.0))},
+    ]
+
+    factors = [
+        {"factor": "ATS 综合得分", "value": int(strength_only), "note": "关键词、经验、项目、学历、格式五维加权"},
+        {"factor": "技能覆盖率", "value": round(coverage, 1), "note": "简历技能命中目标岗位要求的比例"},
+        {"factor": "岗位平均匹配度", "value": round(avg_match, 1), "note": "Top10 命中岗位的平均匹配分"},
+        {"factor": "命中岗位数", "value": matched_count, "note": "当前库中可投递的相关岗位数量"},
+        {"factor": "项目得分", "value": int(project), "note": "满分 20，量化成果和技术深度决定"},
+    ]
+
+    return {
+        "interview_probability": interview,
+        "offer_probability": offer,
+        "competitiveness_score": competitiveness,
+        "radar_data": radar,
+        "factors": factors,
+    }
+
+
+def blend_forecast(baseline, llm_prediction):
+    """
+    把确定性基线和大模型判断按 5:5 融合，既保留可复现性又吸收模型判断。
+    单个数值偏差超过 25 时向基线收敛，避免模型给出离谱数字。
+    """
+    if not llm_prediction:
+        return baseline
+
+    result = dict(baseline)
+    for key in ("interview_probability", "offer_probability", "competitiveness_score"):
+        model_value = llm_prediction.get(key)
+        if not isinstance(model_value, int):
+            continue
+        base_value = baseline[key]
+        if abs(model_value - base_value) > 25:
+            model_value = base_value + (25 if model_value > base_value else -25)
+        result[key] = int(round(base_value * 0.5 + model_value * 0.5))
+
+    if llm_prediction.get("radar_data"):
+        result["radar_data"] = llm_prediction["radar_data"]
+    if llm_prediction.get("reasoning"):
+        result["reasoning"] = llm_prediction["reasoning"]
+    if llm_prediction.get("key_factors"):
+        result["key_factors"] = llm_prediction["key_factors"]
+    if result["offer_probability"] >= result["interview_probability"]:
+        result["offer_probability"] = max(6, result["interview_probability"] - 8)
+    return result
+
+
+def run_llm_agents(parsed_info, ats_result, gap_analysis, matched_jobs, baseline, target_position):
+    """并行执行 4 个依赖解析结果的下游 Agent，把总耗时压到最慢那个"""
+    tasks = {
+        "ats_review": (llm_agents.review_ats, (parsed_info, ats_result, target_position)),
+        "rewrite": (llm_agents.rewrite_resume, (parsed_info, ats_result, gap_analysis, target_position)),
+        "coach": (llm_agents.career_advice, (parsed_info, gap_analysis, matched_jobs, target_position)),
+        "predict": (llm_agents.predict_offer, (parsed_info, ats_result, gap_analysis, matched_jobs, baseline, target_position)),
+    }
+    results = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {name: pool.submit(fn, *args) for name, (fn, args) in tasks.items()}
+        for name, future in futures.items():
+            try:
+                results[name] = future.result(timeout=90)
+            except Exception:
+                results[name] = None
+    return results
+
+
+
+# ============================================================
 # 核心 API: /api/analyze — 10 步完整流水线
 # ============================================================
 @app.post("/api/analyze")
@@ -1531,11 +1744,11 @@ async def analyze_resume(
         start_time = datetime.now()
         execution_flow = []
         
-        def log_step(agent_name, step_name, detail, duration_ms=None, parallel=False):
+        def log_step(agent_name, step_name, detail, duration_ms=None, parallel=False, status="completed"):
             elapsed = (datetime.now() - start_time).total_seconds() * 1000
             entry = {
                 "agent": agent_name,
-                "status": "completed",
+                "status": status,
                 "duration_ms": int(duration_ms or elapsed),
                 "detail": detail,
                 "parallel": parallel,
@@ -1570,6 +1783,23 @@ async def analyze_resume(
                  f"学校={parsed_info['school'] or '--'}, 专业={parsed_info['major'] or '--'}, "
                  f"技能={len(parsed_info['skills'])}项, 项目={len(parsed_info['project_records'])}个, "
                  f"经历={len(parsed_info['experience_records'])}条")
+        
+        # ===== Step 4b: 大模型结构化抽取（可选增强，失败自动回退）=====
+        llm_parsed = None
+        if llm.is_enabled():
+            llm_parse_started = datetime.now()
+            llm_parsed = llm_agents.parse_resume(cleaned_text, target_position)
+            llm_parse_ms = int((datetime.now() - llm_parse_started).total_seconds() * 1000)
+            if llm_parsed:
+                parsed_info, filled_fields = merge_llm_parsed(parsed_info, llm_parsed)
+                log_step("Agent1 · LLM Resume Parser", "大模型简历解析",
+                         f"模型修正/补充 {filled_fields} 个字段 | 技能 {len(parsed_info['skills'])} 项 | "
+                         f"项目 {len(parsed_info['project_records'])} 个 | "
+                         f"经历 {len(parsed_info['experience_records'])} 条",
+                         duration_ms=llm_parse_ms)
+            else:
+                log_step("Agent1 · LLM Resume Parser", "大模型简历解析",
+                         "调用失败，已回退规则解析结果", duration_ms=llm_parse_ms, status="fallback")
         
         # ===== Step 5: 技能标准化（已在提取过程中完成）=====
         # 技能在 extracted 时已经通过 normalize_skill() 标准化
@@ -1655,29 +1885,59 @@ async def analyze_resume(
         # ===== Step 9: 简历优化建议 =====
         resume_optimization = generate_targeted_suggestions(parsed_info, ats_result, gap_analysis, target_position)
         log_step("Resume Optimizer", "优化建议",
-                 f"生成{len(resume_optimization['optimized_sections'])}条优化建议")
+                 f"规则引擎生成{len(resume_optimization['optimized_sections'])}条优化建议")
         
-        # ===== Offer 预测 =====
-        interview_prob = min(max(ats_result['total_score'] - 5 + random.randint(-5, 5), 35), 96)
-        offer_prob = min(interview_prob - random.randint(8, 18), 88)
-        offer_prob = max(offer_prob, 22)
+        # ===== Step 10: 大模型并行增强（ATS评审 / 简历改写 / 职业教练 / Offer预测）=====
+        baseline = deterministic_forecast(parsed_info, ats_result, gap_analysis, matched_jobs)
+        llm_results = {"ats_review": None, "rewrite": None, "coach": None, "predict": None}
         
-        # 竞争力评分（综合评估）
-        skill_factor = min(len(parsed_info['skills']) * 5, 35)
-        edu_map_c = {'博士': 25, '硕士': 20, '本科': 16, '专科': 12}
-        edu_factor = edu_map_c.get(parsed_info.get('education', ''), 15)
-        match_factor = min(len(matched_jobs) * 1.2, 22)
-        ats_factor = int(ats_result['total_score'] * 0.15)
-        competitiveness = min(skill_factor + edu_factor + match_factor + ats_factor + random.randint(3, 10), 97)
+        if llm.is_enabled():
+            llm_enhance_started = datetime.now()
+            llm_results = await asyncio.to_thread(
+                run_llm_agents, parsed_info, ats_result, gap_analysis,
+                matched_jobs, baseline, target_position
+            )
+            llm_enhance_ms = int((datetime.now() - llm_enhance_started).total_seconds() * 1000)
+            for agent_label, result_key in (
+                ("Agent4 · LLM ATS Review", "ats_review"),
+                ("Agent4 · LLM Resume Rewrite", "rewrite"),
+                ("Agent5 · LLM Career Coach", "coach"),
+                ("Agent6 · LLM Offer Predictor", "predict"),
+            ):
+                succeeded = llm_results.get(result_key) is not None
+                log_step(agent_label, "大模型推理",
+                         "完成" if succeeded else "失败，已回退规则引擎",
+                         duration_ms=llm_enhance_ms if succeeded else 0,
+                         parallel=True,
+                         status="completed" if succeeded else "fallback")
         
-        # 能力雷达图
-        radar_data = [
-            {"name": "学历背景", "score": edu_factor + random.randint(0, 8)},
-            {"name": "技能匹配", "score": min(skill_factor + 12, 95)},
-            {"name": "项目经验", "score": ats_result['dimensions'][2]['score'] * 3 + random.randint(5, 18)},
-            {"name": "行业竞争力", "score": min(match_factor * 2 + random.randint(5, 15), 88)},
-            {"name": "发展潜力", "score": random.randint(52, 85)},
-        ]
+        # 简历改写：模型结果优先，规则兜底
+        if llm_results.get("rewrite"):
+            resume_optimization = llm_results["rewrite"]
+        
+        # Offer 预测：确定性基线 + 模型校准（替代原随机数）
+        forecast = blend_forecast(baseline, llm_results.get("predict"))
+        interview_prob = forecast["interview_probability"]
+        offer_prob = forecast["offer_probability"]
+        competitiveness = forecast["competitiveness_score"]
+        radar_data = forecast["radar_data"]
+        
+        # 职业教练：模型优先，规则兜底
+        coach_result = llm_results.get("coach") or {}
+        strengths = coach_result.get("strengths") or generate_strengths(parsed_info, ats_result, gap_analysis)
+        weaknesses = coach_result.get("weaknesses") or generate_weaknesses(gap_analysis, ats_result)
+        growth_advice = coach_result.get("growth_advice") or generate_growth_advice(gap_analysis, target_position)
+        interview_focus = coach_result.get("interview_focus") or []
+        
+        # ATS 评审：模型给出问题诊断，规则评分保持可解释
+        ats_review = llm_results.get("ats_review")
+        
+        # 统计实际生效的大模型 Agent，用于前端展示引擎标识
+        llm_agents_used = []
+        if llm_parsed:
+            llm_agents_used.append("resume_parse")
+        llm_agents_used += [name for name, value in llm_results.items() if value]
+        llm_mode = "llm" if llm_agents_used else "rule"
         
         # ===== 构建完整响应 =====
         session_id = str(uuid.uuid4())
@@ -1688,6 +1948,17 @@ async def analyze_resume(
             "target_position": target_position,
             "target_city": target_city,
             
+            # 推理引擎元信息：前端据此展示「大模型 / 规则」标识
+            "engine": {
+                "mode": llm_mode,
+                "model": llm.health().get("model") if llm_mode == "llm" else None,
+                "agents_used": llm_agents_used,
+                # 配置了密钥（不代表此刻可用）
+                "llm_configured": llm.health().get("enabled", False),
+                # 此刻真正可调用（熔断期内为 False）
+                "llm_available": llm.is_enabled(),
+            },
+
             # 解析调试信息 (新增)
             "_debug": {
                 "extraction": extraction_info,
@@ -1706,6 +1977,7 @@ async def analyze_resume(
             
             # ATS 评分 (Step 6)
             "ats_score": ats_result,
+            "ats_review": ats_review,
             
             # 岗位匹配 (Step 7)
             "matched_jobs": [{
@@ -1731,15 +2003,19 @@ async def analyze_resume(
             # 能力提升计划 (Step 10)
             "improvement_plan": generate_improvement_plan(parsed_info, gap_analysis, target_position, ats_result),
             
-            # Offer 预测
+            # Offer 预测（确定性基线 + 大模型校准）
             "offer_prediction": {
                 "interview_probability": interview_prob,
                 "offer_probability": offer_prob,
                 "competitiveness_score": competitiveness,
                 "radar_data": radar_data,
-                "strengths": generate_strengths(parsed_info, ats_result, gap_analysis),
-                "weaknesses": generate_weaknesses(gap_analysis, ats_result),
-                "growth_advice": generate_growth_advice(gap_analysis, target_position),
+                "strengths": strengths,
+                "weaknesses": weaknesses,
+                "growth_advice": growth_advice,
+                "interview_focus": interview_focus,
+                "reasoning": forecast.get("reasoning", ""),
+                "key_factors": forecast.get("key_factors", []),
+                "analysis": {"factors": baseline.get("factors", [])},
             },
             
             # 执行流程

@@ -90,14 +90,25 @@ cd backend
 
 # 安装依赖
 pip install -r requirements.txt
+```
 
-# 设置DeepSeek API Key
-# Windows PowerShell:
-$env:DEEPSEEK_API_KEY="sk-your-deepseek-api-key"
+**配置大模型（可选，强烈建议）**
 
-# Linux/Mac:
-export DEEPSEEK_API_KEY="sk-your-deepseek-api-key"
+在 `backend/.env` 中填写（该文件已被 gitignore，不会提交）：
 
+```ini
+DEEPSEEK_API_KEY=sk-your-deepseek-api-key
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-chat
+LLM_TIMEOUT=45
+LLM_ENABLED=1
+```
+
+- 不填密钥也能跑：系统自动降级为纯规则引擎模式，响应中 `engine.mode` 为 `rule`
+- 换成百炼 / 智谱 / Kimi / 本地 Ollama 时，同时改 `LLM_BASE_URL` 和 `LLM_MODEL` 即可
+- 连续 3 次调用失败会触发 5 分钟熔断，避免无效密钥拖慢每次请求
+
+```bash
 # 启动服务
 python main.py
 # 或
@@ -105,6 +116,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 访问 http://localhost:8000/docs 查看API文档
+
+`GET /api/health` 可查看大模型配置状态与调用统计，`GET /api/llm/ping` 做一次真实连通性探测。
 
 ### 2. 前端启动
 

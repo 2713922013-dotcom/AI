@@ -548,9 +548,12 @@ const Dashboard = ({ data: rawData }) => {
           offer_probability: rawData.offer_probability||rawData.offer_prediction?.offer_probability||0,
           competitiveness_score: rawData.offer_prediction?.competitiveness_score||(rawData.ats_score ? Math.round((rawData.ats_score.total_score||0)*0.85):0),
           radar_data: rawData.radar_data||rawData.offer_prediction?.radar_data||[],
-          strengths: rawData.strengths||[],
-          weaknesses: rawData.weaknesses||[],
-          growth_advice: rawData.recommendations||[],
+          strengths: rawData.strengths||rawData.offer_prediction?.strengths||[],
+          weaknesses: rawData.weaknesses||rawData.offer_prediction?.weaknesses||[],
+          growth_advice: rawData.recommendations||rawData.offer_prediction?.growth_advice||[],
+          interview_focus: rawData.offer_prediction?.interview_focus||[],
+          reasoning: rawData.offer_prediction?.reasoning||'',
+          key_factors: rawData.offer_prediction?.key_factors||[],
         },
         skill_gap: {
           current_skills: rawData.skill_gap?.current_skills||rawData.skill_gap?.existing_skills||rawData.resume_skills||[],
@@ -679,6 +682,10 @@ const Dashboard = ({ data: rawData }) => {
           <div>
             <h1 className="text-2xl font-extrabold hero-title-grad">分析仪表盘</h1>
             <p className="text-xs text-white/25 mt-0.5">会话ID: {data.session_id?.slice(0,30)}...</p>
+            {data.engine&&(<p className={`text-[11px] mt-1.5 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border ${data.engine.mode==='llm'?'text-emerald-350 border-emerald-400/25 bg-emerald-500/10':'text-white/35 border-white/10 bg-white/[0.03]'}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${data.engine.mode==='llm'?'bg-emerald-400':'bg-white/30'}`}/>
+              {data.engine.mode==='llm'?`${data.engine.model||'大模型'} 推理 · ${data.engine.agents_used?.length||0} 个 Agent`:'规则引擎模式（未接入大模型）'}
+            </p>)}
           </div>
         </div>
         <div className="flex gap-2">
@@ -873,6 +880,24 @@ const Dashboard = ({ data: rawData }) => {
         {/* ATS tab */}
         {activeTab==='ats'&&(
           <div className="space-y-6">
+            {data.ats_review&&(
+              <div className="glass-card p-6">
+                <h2 className="text-lg font-semibold text-white/80 mb-4 flex items-center gap-2"><Lightbulb className="w-5 h-5 text-primary"/>AI 评审意见{data.engine?.model?` · ${data.engine.model}`:''}</h2>
+                {data.ats_review.verdict&&(<p className="text-sm text-white/60 mb-4 p-3 rounded-xl bg-primary/[0.06] border border-primary/15 leading-relaxed">{data.ats_review.verdict}</p>)}
+                {data.ats_review.top_issues?.length>0&&(<div className="space-y-2 mb-4">{data.ats_review.top_issues.map((it,i)=>(
+                  <div key={i} className="glass-card p-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`text-[11px] px-2 py-0.5 rounded-full ${it.severity==='高'?'bg-red-500/12 text-red-350':it.severity==='中'?'bg-yellow-500/12 text-yellow-350':'bg-white/[0.06] text-white/45'}`}>{it.severity}</span>
+                      <span className="text-sm font-semibold text-white/70">{it.title}</span>
+                    </div>
+                    {it.detail&&<p className="text-xs text-white/45 leading-relaxed">{it.detail}</p>}
+                    {it.fix&&<p className="text-xs text-emerald-350 mt-1 leading-relaxed">改法：{it.fix}</p>}
+                  </div>
+                ))}</div>)}
+                {data.ats_review.quick_wins?.length>0&&(<div><h4 className="text-sm font-semibold text-emerald-350 mb-2">立刻能改的动作</h4>
+                  <div className="space-y-1">{data.ats_review.quick_wins.map((q,i)=><div key={i} className="flex items-start gap-2 text-sm text-white/50"><ChevronRight className="w-4 h-4 text-primary flex-shrink-0 mt-0.5"/>{q}</div>)}</div></div>)}
+              </div>
+            )}
             <div className="glass-card p-6"><h2 className="text-lg font-semibold text-white/80 mb-6 flex items-center gap-2"><Award className="w-5 h-5 text-primary"/>ATS评分报告</h2>
               <div className="grid lg:grid-cols-2 gap-8 items-start">
                 <div className="flex flex-col items-center"><EnhancedGauge score={data.ats_score?.total_score||0} label="ATS 总分" size="lg"/>
@@ -933,6 +958,7 @@ const Dashboard = ({ data: rawData }) => {
                 <div className="text-center p-4 glass-card"><EnhancedGauge score={data.offer_prediction?.offer_probability||0} label="Offer概率" size="md" color={{stroke:'#22C55E',hex:'#22C55E'}}/></div>
                 <div className="text-center p-4 glass-card"><p className="text-2xl font-extrabold stat-number-grad text-purple-330">{data.offer_prediction?.competitiveness_score||'--'}</p><p className="text-xs text-white/30 mt-1">竞争力评分</p></div>
               </div>
+              {data.offer_prediction?.reasoning&&(<p className="text-sm text-white/55 mb-6 p-3 rounded-xl bg-primary/[0.05] border border-primary/12 leading-relaxed">{data.offer_prediction.reasoning}</p>)}
               <div className="mb-6"><h4 className="text-sm font-semibold text-white/65 mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-primary"/>概率分布曲线</h4><ProbabilityCurve offerProb={data.offer_prediction?.offer_probability} interviewProb={data.offer_prediction?.interview_probability}/></div>
               <div className="mb-6"><h4 className="text-sm font-semibold text-white/65 mb-3 flex items-center gap-2"><Layers className="w-4 h-4 text-primary"/>多维度能力评估</h4>
                 <div className="h-64"><ResponsiveContainer width="100%" height="100%"><RadarChart data={(data.offer_prediction?.radar_data?.length>0?data.offer_prediction.radar_data.map(d=>({subject:d.name,A:d.score,fullMark:100})):[
@@ -948,10 +974,12 @@ const Dashboard = ({ data: rawData }) => {
               </div>
               <div className="grid sm:grid-cols-2 gap-4 mb-6">
                 <div className="glass-card p-4 border-emerald-500/10"><h4 className="text-sm font-semibold text-emerald-350 mb-2 flex items-center gap-2"><CheckCircle className="w-4 h-4"/>优势</h4>
-                  <div className="space-y-1">{data.offer_prediction?.strengths?.length>0 ? data.offer_prediction.strengths.map((s,i)=><p key={i} className="text-sm text-emerald-350">\u2022 {s}</p>) : <p className="text-xs text-emerald-400/60 italic">无显著优势</p>}</div></div>
+                  <div className="space-y-1">{data.offer_prediction?.strengths?.length>0 ? data.offer_prediction.strengths.map((s,i)=><p key={i} className="text-sm text-emerald-350">• {s}</p>) : <p className="text-xs text-emerald-400/60 italic">无显著优势</p>}</div></div>
                 <div className="glass-card p-4 border-orange-500/10"><h4 className="text-sm font-semibold text-orange-350 mb-2 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/>待提升</h4>
-                  <div className="space-y-1">{data.offer_prediction?.weaknesses?.length>0 ? data.offer_prediction.weaknesses.map((w,i)=><p key={i} className="text-sm text-orange-350">\u2022 {w}</p>) : <p className="text-xs text-orange-400/60 italic">无明显短板</p>}</div></div>
+                  <div className="space-y-1">{data.offer_prediction?.weaknesses?.length>0 ? data.offer_prediction.weaknesses.map((w,i)=><p key={i} className="text-sm text-orange-350">• {w}</p>) : <p className="text-xs text-orange-400/60 italic">无明显短板</p>}</div></div>
               </div>
+              {data.offer_prediction?.interview_focus?.length>0&&(<div className="mb-6"><h4 className="text-sm font-semibold text-white/65 mb-2 flex items-center gap-2"><HelpCircle className="w-4 h-4 text-primary"/>面试重点准备</h4>
+                <div className="space-y-1">{data.offer_prediction.interview_focus.map((f,i)=><div key={i} className="flex items-start gap-2 text-sm text-white/50 glass-card p-2"><ChevronRight className="w-4 h-4 text-primary flex-shrink-0 mt-0.5"/>{f}</div>)}</div></div>)}
               {data.offer_prediction?.growth_advice?.length>0&&(<div><h4 className="text-sm font-semibold text-white/65 mb-2 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-primary"/>成长建议</h4>
                 <div className="space-y-1">{data.offer_prediction.growth_advice.map((advice,i)=><div key={i} className="flex items-start gap-2 text-sm text-white/50 glass-card p-2"><Star className="w-4 h-4 text-warning flex-shrink-0 mt-0.5"/>{advice}</div>)}</div></div>)}
             </div>
@@ -975,6 +1003,15 @@ const Dashboard = ({ data: rawData }) => {
                   {label:'需要OCR',value:data._debug?.extraction?.needs_ocr?'是':'否',color:data._debug?.extraction?.needs_ocr?'#EF4444':'#10B981'},
                 ].map((m,i)=>(<div key={i} className="glass-card p-3 text-center"><p className="text-[10px] text-white/25 mb-1">{m.label}</p><p className="text-base font-bold" style={{color:m.color}}>{m.value}</p></div>))}
               </div>
+
+              {data.execution_flow?.length>0&&(<div className="mb-6"><h4 className="text-sm font-semibold text-white/65 mb-2">执行流程 · {data.engine?.mode==='llm'?'大模型增强':'规则引擎'}</h4>
+                <div className="space-y-1">{data.execution_flow.map((f,i)=>(
+                  <div key={i} className="flex items-center gap-2 text-xs glass-card px-3 py-2">
+                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${f.status==='fallback'?'bg-yellow-400':'bg-emerald-400'}`}/>
+                    <span className="text-white/55 font-medium sm:min-w-[190px]">{f.agent}</span>
+                    <span className="text-white/30 flex-1 hidden sm:block">{f.detail}</span>
+                    <span className="text-white/25 flex-shrink-0">{f.duration_ms}ms</span>
+                  </div>))}</div></div>)}
 
               {data._debug?.sections_detected && data._debug.sections_detected.length > 0 && (
                 <div className="mb-6"><h4 className="text-sm font-semibold text-white/65 mb-2">Step 3: 检测到的章节</h4>

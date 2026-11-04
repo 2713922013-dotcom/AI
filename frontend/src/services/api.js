@@ -48,15 +48,18 @@ export async function analyzeResume(file, targetPosition, targetCity, onProgress
 
   let stepIndex = 0
   const progressInterval = setInterval(() => {
-    if (stepIndex < steps.length) {
+    // 大模型推理耗时较长，进度条最多推进到 90%，避免提前跑完让用户以为卡住
+    if (stepIndex < steps.length - 1) {
       onProgress?.(steps[stepIndex])
       stepIndex++
     }
-  }, 1500)
+  }, 4000)
 
   try {
     const response = await api.post('/analyze', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      // 大模型串行解析 + 并行推理，正常 15-60s，留足余量
+      timeout: 120000,
     })
 
     clearInterval(progressInterval)
@@ -319,6 +322,9 @@ function transformAnalysisData(raw) {
     target_position: raw.target_position,
     target_city: raw.target_city,
 
+    // 推理引擎标识（llm = 大模型参与，rule = 纯规则引擎）
+    engine: raw.engine || null,
+
     // 简历解析结果 (Step 1-5)
     resume_parsed: {
       name: parsed.name || '',
@@ -358,11 +364,15 @@ function transformAnalysisData(raw) {
       suggestions: ats.suggestions || raw.ats_detail?.suggestions || [],
     },
 
+    // ATS AI 评审（大模型可用时才有值）
+    ats_review: raw.ats_review || null,
+
     // 简历优化 (Step 9)
     resume_optimization: {
       original: opt.original || '',
       optimized: (Array.isArray(opt.optimized_sections) ? opt.optimized_sections.map(s => s.optimized).filter(Boolean).join('\n') : ''),
       optimized_sections: Array.isArray(opt.optimized_sections) ? opt.optimized_sections : [],
+      summary: opt.summary || '',
     },
 
     // Offer预测
@@ -375,6 +385,10 @@ function transformAnalysisData(raw) {
       strengths: offer.strengths || raw.strengths || [],
       weaknesses: offer.weaknesses || raw.weaknesses || [],
       growth_advice: offer.growth_advice || raw.recommendations || [],
+      interview_focus: offer.interview_focus || [],
+      reasoning: offer.reasoning || '',
+      key_factors: offer.key_factors || [],
+      analysis: offer.analysis || null,
     },
 
     // 技能缺口 (Step 8 - 新结构)
