@@ -17,8 +17,12 @@ except ImportError:
     from PyPDF2 import PdfReader
     HAS_PYMUPDF = False
 
-# 导入真实岗位数据
-from job_crawler import get_real_jobs, get_data_source_report
+# 岗位存储层：所有岗位读写都走它，不再有写死在代码里的数据列表
+from store import get_store
+# JD 原文解析：用户粘贴的招聘信息 -> 结构化岗位字段
+from jd_parser import parse_jd as parse_jd_text
+# 技能词典：简历解析与 JD 解析共用，保证两边技能名一致
+from skill_taxonomy import FULL_SKILL_KEYWORDS, SKILL_NORMALIZE_MAP, normalize_skill
 
 # 大模型推理层（未配置密钥时全部返回 None，自动回退规则引擎）
 import asyncio
@@ -27,132 +31,34 @@ from concurrent.futures import ThreadPoolExecutor
 import llm
 import llm_agents
 
-ENGINE_VERSION = "3.3.0"  # 单一版本号来源，health 与 analyze 共用，避免两处不一致
+ENGINE_VERSION = "3.4.0"  # 单一版本号来源，health 与 analyze 共用，避免两处不一致
 
 app = FastAPI(title="Offer Hunter API", version=ENGINE_VERSION)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # ============================================================
-# 岗位数据
+# 岗位数据（存储层 + 进程内缓存）
 # ============================================================
-JOBS_DATA = get_real_jobs()
-DATA_SOURCE_REPORT = get_data_source_report()
-
-# ============================================================
-# Step 5: 技能名称标准化映射表
-# ============================================================
-SKILL_NORMALIZE_MAP = {
-    # 编程语言缩写
-    'js': 'JavaScript', 'javascript': 'JavaScript', 'ts': 'TypeScript', 'typescript': 'TypeScript',
-    'py': 'Python', 'python': 'Python', 'java': 'Java', 'go': 'Go', 'golang': 'Go',
-    'c++': 'C++', 'cpp': 'C++', 'c#': 'C#', 'cs': 'C#', 'rust': 'Rust',
-    'swift': 'Swift', 'kotlin': 'Kotlin', 'objc': 'Objective-C', 'ruby': 'Ruby',
-    'php': 'PHP', 'scala': 'Scala', 'r语言': 'R', 'r ': 'R',
-    
-    # 前端框架
-    'reactjs': 'React', 'react.js': 'React', 'vuejs': 'Vue', 'vue.js': 'Vue',
-    'vue3': 'Vue', 'angularjs': 'Angular', 'next': 'Next.js', 'nextjs': 'Next.js',
-    'nuxt': 'Nuxt.js', 'nuxtjs': 'Nuxt.js', 'svelte': 'Svelte',
-    
-    # 后端框架
-    'node': 'Node.js', 'nodejs': 'Node.js', 'express': 'Express.js', 'koa': 'Koa.js',
-    'spring': 'Spring Boot', 'springboot': 'Spring Boot', 'spring boot': 'Spring Boot',
-    'django': 'Django', 'flask': 'Flask', 'fastapi': 'FastAPI', 'gin': 'Gin',
-    'egg': 'Egg.js', 'nest': 'NestJS',
-    
-    # 数据库
-    'mysql': 'MySQL', 'postgresql': 'PostgreSQL', 'postgres': 'PostgreSQL', 'pg': 'PostgreSQL',
-    'mongo': 'MongoDB', 'mongodb': 'MongoDB', 'redis': 'Redis', 'es': 'Elasticsearch',
-    'elasticsearch': 'Elasticsearch', 'sqlite': 'SQLite', 'oracle': 'Oracle',
-    
-    # DevOps / 云
-    'docker': 'Docker', 'k8s': 'Kubernetes', 'kubernetes': 'Kubernetes', 'k8': 'Kubernetes',
-    'aws': 'AWS', 'gcp': 'GCP', 'azure': 'Azure', 'ci/cd': 'CI/CD', 'cicd': 'CI/CD',
-    'linux': 'Linux', 'git': 'Git', 'github': 'GitHub', 'gitlab': 'GitLab',
-    
-    # AI/ML/DL
-    'ml': 'Machine Learning', '机器学习': '机器学习', 'dl': '深度学习', '深度学习': '深度学习',
-    'nlp': 'NLP', 'cv': '计算机视觉', 'pytorch': 'PyTorch', 'tensorflow': 'TensorFlow',
-    'tf': 'TensorFlow', 'keras': 'Keras', 'paddlepaddle': 'PaddlePaddle',
-    'llm': 'LLM', '大模型': 'LLM', 'transformer': 'Transformer',
-    
-    # 数据相关
-    'sql': 'SQL', 'nosql': 'NoSQL', 'hadoop': 'Hadoop', 'spark': 'Spark',
-    'hive': 'Hive', '数仓': 'Data Warehouse', 'datawarehouse': 'Data Warehouse',
-    'tableau': 'Tableau', 'powerbi': 'Power BI', 'finereport': 'FineReport',
-    'etl': 'ETL', '数据分析': '数据分析', 'data analysis': '数据分析',
-    
-    # 移动端
-    'flutter': 'Flutter', 'rn': 'React Native', 'reactnative': 'React Native',
-    'android': 'Android', 'ios': 'iOS', 'swiftui': 'SwiftUI',
-    
-    # 游戏开发
-    'unity': 'Unity', 'unreal': 'Unreal Engine', 'ue4': 'Unreal Engine', 'ue5': 'Unreal Engine',
-    'shader': 'Shader', 'opengl': 'OpenGL', 'directx': 'DirectX',
-    'cocos': 'Cocos', 'cocos2d': 'Cocos2d',
-    
-    # 运营/策划类
-    '活动策划': '活动策划', '用户运营': '用户运营', '内容运营': '内容运营',
-    '新媒体运营': '新媒体运营', '社群运营': '社群运营', '电商运营': '电商运营',
-    '品牌策划': '品牌策划', '数值策划': '数值策划', '系统策划': '系统策划',
-    '关卡策划': '关卡策划', '剧情策划': '剧情策划', '文案策划': '文案策划',
-    '游戏策划': '游戏策划', '产品运营': '产品运营', '增长运营': '用户增长',
-    
-    # 产品/设计类
-    '产品经理': 'Product Manager', 'pm': 'Product Manager', 'axure': 'Axure',
-    'figma': 'Figma', 'sketch': 'Sketch', 'xd': 'Adobe XD',
-    'ui设计': 'UI Design', 'ux设计': 'UX Design', '平面设计': 'Graphic Design',
-    'ps': 'Photoshop', 'photoshop': 'Photoshop', 'ai': 'Illustrator',
-    'illustrator': 'Illustrator', 'pr': 'Premiere', 'premiere': 'Premiere',
-    'ae': 'After Effects', 'aftereffects': 'After Effects',
-    
-    # 软技能
-    '项目管理': 'Project Management', 'agile': '敏捷开发', 'scrum': 'Scrum',
-    'excel': 'Excel/PPT', 'ppt': 'Excel/PPT', 'office': 'Office',
-}
-
-# ============================================================
-# 完整技能关键词库（用于扫描简历）
-# ============================================================
-FULL_SKILL_KEYWORDS = [
-    "Python","Java","C++","C#","Go","Rust","JavaScript","TypeScript",
-    "React","Vue","Angular","Node.js","Spring Boot","Django","Flask","FastAPI",
-    "SQL","MySQL","PostgreSQL","MongoDB","Redis","Elasticsearch","NoSQL",
-    "Docker","Kubernetes","AWS","Linux","Git","CI/CD","GitHub",
-    "机器学习","深度学习","NLP","计算机视觉","PyTorch","TensorFlow","LLM","Transformer",
-    "数据分析","Data Analysis","Spark","Hadoop","Tableau","Power BI","ETL","Data Warehouse",
-    "微服务","分布式","消息队列","Kafka","RabbitMQ","RocketMQ",
-    "Unity","Unreal Engine","Shader","OpenGL","游戏开发","Cocos","3D",
-    "Flutter","React Native","Android","iOS","Swift","Kotlin",
-    "产品设计","User Research","Axure","Figma","Sketch","UI Design","UX Design",
-    "Photoshop","Premiere","After Effects","Illustrator",
-    "自动化测试","Selenium","性能测试","安全测试","JMeter",
-    "活动策划","用户运营","内容运营","新媒体运营","社群运营","电商运营",
-    "品牌策划","数值策划","系统策划","关卡策划","剧情策划","文案策划","游戏策划",
-    "产品运营","用户增长","A/B测试","竞品分析","SEO","SEM",
-    "商业化","项目管理","用户分层","增长策略","活动执行",
-    "品牌营销","整合营销","公关传播","社交媒体","短视频","直播",
-    "Excel/PPT","SPSS","PR","文案撰写","脚本撰写","视频剪辑","活动执行",
-    "数据监控","效果复盘","用户调研","需求文档","原型设计",
-    "版本管理","持续集成","负载均衡","容器化","服务网格",
-    "Agile","Scrum","Project Management","Office",
-]
+# 岗位现在是可写的（用户能导入 JD），所以不能再是模块级常量。
+# 用惰性缓存：读多写少，写操作后 invalidate_jobs() 失效即可。
+_jobs_cache = None
 
 
-def normalize_skill(raw_name):
-    """Step 5: 标准化技能名称"""
-    if not raw_name:
-        return None
-    key = raw_name.strip().lower().replace(' ','').replace('-','')
-    if key in SKILL_NORMALIZE_MAP:
-        return SKILL_NORMALIZE_MAP[key]
-    # 检查是否已标准（首字母大写且在库中）
-    for std in FULL_SKILL_KEYWORDS:
-        if raw_name.strip().lower() == std.lower():
-            return std
-        if key == std.lower().replace(' ','').replace('-',''):
-            return std
-    return raw_name.strip() if len(raw_name) > 1 else None
+def JOBS():
+    """返回全部岗位（含技能列表与过期标记）。"""
+    global _jobs_cache
+    if _jobs_cache is None:
+        _jobs_cache = get_store().all_jobs()
+    return _jobs_cache
+
+
+def invalidate_jobs():
+    """岗位库发生写入/删除后调用，让下一次读取重新查库。"""
+    global _jobs_cache
+    _jobs_cache = None
+
+
+# 技能词典已抽到 skill_taxonomy.py，简历解析与 JD 解析共用同一份
 
 
 # ============================================================
@@ -907,6 +813,54 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
 # ============================================================
 # Step 6: ATS 评分引擎（真实评分，非随机）
 # ============================================================
+def _records_text(records):
+    """把经历/项目记录拼成可搜索文本。
+
+    只取内容字段，不 str() 整个 dict —— 否则键名（"description" 等）会被当成
+    简历内容参与匹配，凭空造出命中。
+    """
+    parts = []
+    for r in records or []:
+        if not isinstance(r, dict):
+            continue
+        for key in ('name', 'role', 'company', 'position', 'description'):
+            val = r.get(key)
+            if isinstance(val, str):
+                parts.append(val)
+        stack = r.get('tech_stack')
+        if isinstance(stack, list):
+            parts.extend(str(x) for x in stack)
+    return " ".join(parts)
+
+
+def _position_keyword_hit(pkw, resume_skills, parsed_info):
+    """判断目标岗位关键词是否被简历覆盖。
+
+    为什么不能直接比字面：求职者填「数据分析师」和「数据分析」是同一个岗位，
+    但字面不同。原实现只做精确比对，导致加一个「师」字就从 72 分掉到 37 分。
+    所以先剥掉岗位后缀再比，并允许在专业/项目/经历文本中命中。
+
+    注意后缀表里不放「运营」「策划」这类本身有实义的词，
+    否则「产品运营」会被剥成「产品」，匹配变松。
+    """
+    variants = {pkw.lower()}
+    stripped = re.sub(
+        r'(工程师|分析师|设计师|专员|经理|助理|实习生|主管|总监|架构师)$', '', pkw
+    ).strip()
+    if len(stripped) >= 2 and stripped != pkw:
+        variants.add(stripped.lower())
+
+    skill_lower = {str(s).lower() for s in resume_skills}
+    blob = " ".join([
+        str(parsed_info.get('major') or ''),
+        _records_text(parsed_info.get('project_records')),
+        _records_text(parsed_info.get('experience_records')),
+        " ".join(skill_lower),
+    ]).lower()
+
+    return any(v in skill_lower or v in blob for v in variants)
+
+
 def calculate_ats_score(parsed_info, target_position, job_skills_required=None):
     """
     Step 6: ATS 评分引擎 — 基于实际字段匹配的真实评分
@@ -930,13 +884,7 @@ def calculate_ats_score(parsed_info, target_position, job_skills_required=None):
     matched_position_kws = 0
     total_position_kws = max(len(position_kw_list), 1)
     for pkw in position_kw_list:
-        pkw_norm = normalize_skill(pkw)
-        # 在技能、专业、项目中搜索
-        if pkw_norm and pkw_norm.lower() in [s.lower() for s in resume_skills]:
-            matched_position_kws += 1
-        elif pkw.lower() in (parsed_info.get('major','') or '').lower():
-            matched_position_kws += 1
-        elif pkw.lower() in str(parsed_info.get('project_records','')).lower():
+        if _position_keyword_hit(pkw, resume_skills, parsed_info):
             matched_position_kws += 1
     
     keyword_score_base = int(matched_position_kws / total_position_kws * 35)  # 最高35分
@@ -1108,7 +1056,7 @@ def generate_ats_suggestions(kw_score, exp_score, proj_score, parsed, position):
 # ============================================================
 # Step 7: JD 解析 + 字段级岗位匹配
 # ============================================================
-def parse_jd(job):
+def parse_job_record(job):
     """解析单个 JD 的结构化需求"""
     desc = (job.get('description', '') or '').lower()
     required = set(job.get('skills_required', []))
@@ -1677,13 +1625,13 @@ async def health():
     llm_info = llm.health()
     return {
         "status": "ok",
-        "message": "Offer Hunter API v3.3 — Grounded Resume Rewriter",
+        "message": "Offer Hunter API v3.4 — Real Jobs, Traceable Sources",
         "engine_version": ENGINE_VERSION,
         "features": ["PyMuPDF Extraction", "Content Cleaning", "PDF Usability Guard",
                      "Rule-Based Section Detection", "Skill Normalization", "Real ATS Scoring",
                      "Field-Level Job Matching", "LLM Resume Parsing", "LLM Resume Rewrite",
-                     "LLM Career Coaching"],
-        "job_count": len(JOBS_DATA),
+                     "LLM Career Coaching", "Job Store (SQLite)", "JD Import", "Source Traceability", "Stale Data Guard"],
+        "job_count": len(JOBS()),
         "has_pymupdf": HAS_PYMUPDF,
         "llm": {
             "configured": llm_info["enabled"],
@@ -1712,43 +1660,114 @@ async def llm_ping():
 
 
 @app.get("/api/jobs")
-async def get_jobs(position: str = "", city: str = "", industry: str = "", limit: int = 1000):
-    result = JOBS_DATA
+async def get_jobs(position: str = "", city: str = "", industry: str = "",
+                   source_type: str = "", limit: int = 1000):
+    result = JOBS()
     if position:
-        result = [j for j in result if position.lower() in j["title"].lower() or position.lower() in j["company"].lower()]
+        kw = position.lower()
+        result = [
+            j for j in result
+            if kw in j["title"].lower()
+            or kw in j["company"].lower()
+            or any(kw in s.lower() for s in j.get("skills_required", []))
+        ]
     if city:
         result = [j for j in result if city in j["city"]]
     if industry:
         result = [j for j in result if industry in j["industry"]]
+    if source_type in ("seed", "user_import"):
+        result = [j for j in result if j["source_type"] == source_type]
     total = len(result)
     result = result[:limit]
-    return {"code": 0, "data": result, "total": total, "message": "ok"}
+    return {
+        "code": 0,
+        "data": result,
+        "total": total,
+        "stale": sum(1 for j in result if j.get("is_stale")),
+        "message": "ok",
+    }
+
+
+@app.post("/api/jobs/parse")
+async def parse_jd_endpoint(payload: dict):
+    """只解析、不入库。前端用它把用户粘贴的 JD 预填进表单，让用户校对后再保存。"""
+    result = parse_jd_text(payload.get("raw_text", ""))
+    return {"code": 0 if result["ok"] else -1, **result}
+
+
+@app.post("/api/jobs/import")
+async def import_job(payload: dict):
+    """导入岗位。
+
+    字段取值优先级：用户传的 > 解析出来的。
+    前端流程是「粘贴 -> 解析预填 -> 用户改 -> 提交」，所以以用户填的为准；
+    也支持只传 raw_text 直接入库（后端解析到什么算什么）。
+    只有岗位名称是硬性要求。
+    """
+    raw_text = (payload.get("raw_text") or "").strip()
+    parsed = parse_jd_text(raw_text) if raw_text else {}
+    merged = dict(parsed.get("data") or {})
+
+    for key in ("title", "company", "city", "description", "education_required",
+                "industry", "experience_required", "source_url"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            merged[key] = val.strip()
+
+    for key in ("salary_min", "salary_max"):
+        val = payload.get(key)
+        if isinstance(val, (int, float)) and val >= 0:
+            merged[key] = int(val)
+
+    skills = payload.get("skills_required")
+    if isinstance(skills, list) and skills:
+        merged["skills_required"] = [str(s).strip() for s in skills if str(s).strip()]
+
+    if not (merged.get("title") or "").strip():
+        return JSONResponse(
+            status_code=400,
+            content={"code": -1, "message": "缺少岗位名称，无法导入", "missing_fields": ["title"]},
+        )
+
+    res = get_store().add(merged, source_type="user_import")
+    if not res["ok"]:
+        if res["reason"] == "duplicate":
+            return {
+                "code": 1,
+                "message": "这个岗位已经在库里了，没有重复添加",
+                "data": get_store().get(res["id"]),
+            }
+        return {"code": -1, "message": "导入失败：缺少岗位名称"}
+
+    invalidate_jobs()
+    return {"code": 0, "message": "已导入，可以开始分析匹配度", "data": get_store().get(res["id"])}
 
 
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: int):
-    for j in JOBS_DATA:
-        if j["id"] == job_id:
-            return {"code": 0, "data": j, "message": "ok"}
-    return {"code": -1, "message": "岗位不存在"}
+    job = get_store().get(job_id)
+    if not job:
+        return {"code": -1, "message": "岗位不存在"}
+    return {"code": 0, "data": job, "message": "ok"}
+
+
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: int):
+    """删除岗位。预置的核验岗位受保护，只能删自己导入的。"""
+    res = get_store().delete(job_id)
+    if not res["ok"]:
+        message = {
+            "not_found": "岗位不存在或已被删除",
+            "protected": "预置的核验岗位不能删除（它们带真实来源链接，是可追溯的依据）",
+        }.get(res["reason"], "删除失败")
+        return {"code": -1, "message": message}
+    invalidate_jobs()
+    return {"code": 0, "message": "已删除"}
 
 
 @app.get("/api/stats")
 async def stats():
-    industries_set = list(set(j["industry"] for j in JOBS_DATA))
-    cities_set = list(set(j["city"] for j in JOBS_DATA))
-    companies_set = list(set(j["company"] for j in JOBS_DATA))
-    return {
-        "code": 0,
-        "data": {
-            "total_jobs": len(JOBS_DATA),
-            "industries": industries_set,
-            "cities": cities_set,
-            "companies": companies_set,
-            "data_sources": len(DATA_SOURCE_REPORT.get("data_sources", [])),
-        },
-        "message": "ok"
-    }
+    return {"code": 0, "data": get_store().stats(), "message": "ok"}
 
 
 # ============================================================
@@ -1937,7 +1956,6 @@ def run_llm_agents(parsed_info, ats_result, gap_analysis, matched_jobs, baseline
     return results
 
 
-
 # ============================================================
 # 核心 API: /api/analyze — 10 步完整流水线
 # ============================================================
@@ -2056,7 +2074,7 @@ async def analyze_resume(
         # ===== Step 6: ATS 评分（真实评分引擎）=====
         # 收集 Top 岗位的技能要求用于评分参考
         top_job_skills = set()
-        for j in JOBS_DATA[:50]:
+        for j in JOBS()[:50]:
             sks = j.get('skills_required', [])
             if isinstance(sks, list):
                 top_job_skills.update(sks)
@@ -2077,8 +2095,8 @@ async def analyze_resume(
         position_lower = target_position.lower()
         scored_jobs = []
         
-        for job in JOBS_DATA:
-            parsed_jd = parse_jd(job)
+        for job in JOBS():
+            parsed_jd = parse_job_record(job)
             match_result = field_level_match(parsed_info, parsed_jd, target_position)
             
             if match_result["match_score"] > 10:
@@ -2107,7 +2125,7 @@ async def analyze_resume(
         # 补充同城市岗位
         if len(matched_jobs) < 10:
             existing_ids = {j["id"] for j in matched_jobs}
-            extras = [j for j in JOBS_DATA if j["id"] not in existing_ids]
+            extras = [j for j in JOBS() if j["id"] not in existing_ids]
             if target_city:
                 city_jobs = [j for j in extras if target_city in j.get("city", "")]
                 extras = city_jobs + [j for j in extras if j not in city_jobs]
@@ -2353,17 +2371,56 @@ async def get_history(limit: int = 20):
     return {"code": 0, "data": result[:limit], "total": len(result), "message": "ok"}
 
 # ============================================================
+# API 兜底：不存在的 /api/* 一律返回 JSON 404
+# 必须放在所有 API 路由之后、静态文件挂载之前。
+# 否则会被下面的 mount("/") 吃掉，回退成 index.html，
+# 前端拿到一段 HTML 去 JSON.parse，报的是语法错误而不是「接口不存在」。
+# ============================================================
+@app.api_route("/api/{rest:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+async def api_not_found(rest: str):
+    return JSONResponse(
+        status_code=404,
+        content={"code": -1, "message": f"接口不存在：/api/{rest}"},
+    )
+
+
+# ============================================================
 # 前端静态文件挂载（必须在所有API路由之后，防止覆盖）
 # 使用 SPAStaticFiles: 只对非API路径提供静态文件
 # ============================================================
 class SPAStaticFiles(StaticFiles):
-    """覆盖 StaticFiles 使其不拦截 /api /docs /openapi.json 等路径"""
+    """静态文件 + SPA 路由回退。
+
+    单页应用的路由（/jobs 等）在服务器上没有对应文件，直接访问会 404。
+    所以找不到文件时回退到 index.html，交给前端路由处理。
+
+    但带扩展名的请求（.js/.css/.png）不能回退 —— 那些是真实资源，
+    缺失时必须返回 404，否则浏览器会把一段 HTML 当 JS 解析，
+    报出莫名其妙的语法错误，比 404 更难排查。
+    """
     async def get_response(self, path: str, scope):
-        # API路径和文档路径不拦截
-        if path.startswith("api/") or path.startswith("docs") or path.startswith("openapi.json") or path.startswith("redoc"):
-            from starlette.responses import Response
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+        from starlette.responses import Response
+
+        # API 与文档路径不拦截（path 是否带前导斜杠取决于 mount 方式，统一去掉再判断）
+        if path.lstrip("/").startswith(("api/", "docs", "openapi.json", "redoc")):
             return Response(status_code=404)
-        return await super().get_response(path, scope)
+
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            response = None
+
+        if response is not None and response.status_code != 404:
+            return response
+
+        # 静态资源缺失就是缺失，不回退成 HTML
+        if os.path.splitext(path)[1]:
+            return Response(status_code=404)
+
+        return await super().get_response("index.html", scope)
 
 for frontend_dist in [
     os.path.join(os.path.dirname(__file__), "frontend", "dist"),

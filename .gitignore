@@ -32,3 +32,5 @@ Thumbs.db
 # Build artifacts
 # backend/frontend/dist is built by Render's build step
 # frontend/dist is built locally
+# 运行时生成的岗位数据库（种子在 seed_jobs.json，随代码走）
+backend/data/

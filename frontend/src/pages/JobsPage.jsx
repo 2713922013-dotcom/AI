@@ -5,9 +5,11 @@ import {
   Filter, X, ChevronDown, ChevronUp, GraduationCap,
   Clock, DollarSign, Sparkles, Eye,
   Bookmark, BookmarkCheck, Download, RefreshCw,
-  SlidersHorizontal, ArrowUpDown, Brain, Cpu
+  SlidersHorizontal, ArrowUpDown, Brain, Cpu,
+  ShieldCheck, UserPlus, Trash2, ExternalLink, AlertTriangle,
+  Plus, ClipboardPaste, Loader2, CheckCircle2
 } from 'lucide-react'
-import { getJobs } from '../services/api'
+import { getJobs, parseJD, importJob, deleteJob } from '../services/api'
 
 // ===== 常量配置 =====
 
@@ -174,11 +176,6 @@ function formatSalary(min, max) {
   return '薪资面议'
 }
 
-// AI 匹配度（模拟）
-function getAIMatchScore() {
-  return Math.floor(Math.random() * 30) + 70 // 70-99
-}
-
 // 薪资颜色（渐变文字用）
 function getSalaryGradientClass(min, max) {
   const avg = ((Number(min) || 0) + (Number(max) || 0)) / 2
@@ -203,28 +200,28 @@ function getIndustryStyle(industry) {
   return map[industry] || { border: 'border-white/10', bg: 'bg-white/[0.03]', text: 'text-white/60' }
 }
 
-// 匹配度环形进度条 SVG
-function MatchRing({ score }) {
-  const pct = score
-  const radius = 22
-  const circumference = 2 * Math.PI * radius
-  const offset = circumference - (pct / 100) * circumference
-  
-  let color = '#EF4444'
-  if (score >= 85) color = '#22C55E'
-  else if (score >= 70) color = '#F59E0B'
-  else if (score >= 50) color = '#38BDF8'
-
+// 数据来源标识
+//
+// 这里原来是一个「AI 匹配度」环形图，数值来自 Math.random() * 30 + 70。
+// 它跟岗位内容、跟你的简历都没有任何关系，但用户会拿这个百分比判断要不要投。
+// 换成真实的信息：这条数据是哪来的、什么时候采的。
+function SourceBadge({ job }) {
+  const isSeed = job.source_type === 'seed'
   return (
-    <svg width="52" height="52" viewBox="0 0 52 52">
-      <circle cx="26" cy="26" r={radius} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="4" />
-      <circle cx="26" cy="26" r={radius} fill="none" stroke={color} strokeWidth="4"
-        strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={offset}
-        style={{ transition: 'stroke-dashoffset 1s ease-out', transform: 'rotate(-90deg)', transformOrigin: 'center' }}
-      />
-      <text x="26" y="26" dominantBaseline="central" textAnchor="middle"
-        fontSize="12" fontWeight="800" fill={color}>{score}%</text>
-    </svg>
+    <div className="flex flex-col items-end gap-1.5">
+      <span
+        className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold border ${
+          isSeed ? 'text-emerald-300 border-emerald-400/25' : 'text-sky-300 border-sky-400/25'
+        }`}
+        style={{ background: isSeed ? 'rgba(52,211,153,0.07)' : 'rgba(56,189,248,0.07)' }}
+      >
+        {isSeed ? <ShieldCheck className="w-3 h-3" /> : <UserPlus className="w-3 h-3" />}
+        {isSeed ? '已核验' : '我导入的'}
+      </span>
+      <span className="text-[10px]" style={{ color: 'rgba(255,255,255,0.22)' }}>
+        {isSeed && job.collected_at ? `${job.collected_at} 采集` : '自己粘贴的 JD'}
+      </span>
+    </div>
   )
 }
 
@@ -308,13 +305,14 @@ const FilterPanel = ({ filters, setFilters, showFilters, industries, cities, exp
 )
 
 // ===== 子组件：统计概览条（深色版）=====
-const StatsBar = ({ total, filtered, industries, cities }) => (
-  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+const StatsBar = ({ total, filtered, verified, imported, industries, cities }) => (
+  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
     {[
       { value: total, label: '岗位总数', gradFrom: '#6C7BFF', gradTo: '#38BDF8' },
+      { value: verified, label: '公开渠道核验', gradFrom: '#22C55E', gradTo: '#14B8A6' },
+      { value: imported, label: '我导入的', gradFrom: '#38BDF8', gradTo: '#818CF8' },
       { value: filtered, label: '当前筛选结果', gradFrom: '#8B5CF6', gradTo: '#EC4899' },
-      { value: Object.keys(industries).length, label: '覆盖行业', gradFrom: '#F59E0B', gradTo: '#EF4444' },
-      { value: Object.keys(cities).length, label: '覆盖城市', gradFrom: '#22C55E', gradTo: '#14B8A6' },
+      { value: Object.keys(cities).length, label: '覆盖城市', gradFrom: '#F59E0B', gradTo: '#EF4444' },
     ].map((stat, i) => (
       <div key={i} className="glass-card card-lift p-5 text-center count-animate-dark" style={{ animationDelay: `${i * 80}ms` }}>
         <p className="text-3xl md:text-4xl font-extrabold stat-number-grad">{stat.value}</p>
@@ -325,12 +323,12 @@ const StatsBar = ({ total, filtered, industries, cities }) => (
 )
 
 // ===== 子组件：岗位卡片（Glass Card 风格）=====
-const JobCard = ({ job, isCollected, onToggleCollect, onExport, index }) => {
+const JobCard = ({ job, isCollected, onToggleCollect, onExport, onDelete, index }) => {
   const [expanded, setExpanded] = useState(false)
   const skills = parseSkills(job.skills_required)
-  const matchScore = getAIMatchScore()
   const salaryGrad = getSalaryGradientClass(job.salary_min, job.salary_max)
   const indStyle = getIndustryStyle(job.industry)
+  const isStale = !!job.is_stale
 
   return (
     <div className="glass-card card-lift group relative overflow-hidden" style={{ transitionDelay: `${(index % 4) * 80}ms` }}>
@@ -375,9 +373,9 @@ const JobCard = ({ job, isCollected, onToggleCollect, onExport, index }) => {
             </div>
           </div>
 
-          {/* Right column: AI match ring + Salary */}
+          {/* Right column: 数据来源 + Salary */}
           <div className="flex-shrink-0 flex flex-col items-end gap-3">
-            <MatchRing score={matchScore} />
+            <SourceBadge job={job} />
             <div className="text-right">
               <p className={`text-xl md:text-2xl font-extrabold bg-gradient-to-r ${salaryGrad} bg-clip-text text-transparent`}>
                 {formatSalary(job.salary_min, job.salary_max)}
@@ -386,6 +384,19 @@ const JobCard = ({ job, isCollected, onToggleCollect, onExport, index }) => {
             </div>
           </div>
         </div>
+
+        {/* 过期提示：超过 90 天没更新就明说，不假装还在招 */}
+        {isStale && (
+          <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded-xl text-[11px] leading-relaxed"
+            style={{ background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.16)', color: 'rgba(251,191,36,0.75)' }}>
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            <span>
+              这条岗位采集于 {job.collected_at || '未知日期'}
+              {job.stale_days != null && `，距今 ${job.stale_days} 天`}，很可能已停止招聘。
+              投递前请先核实。
+            </span>
+          </div>
+        )}
 
         {/* Skill tags */}
         {skills.length > 0 && (
@@ -460,7 +471,7 @@ const JobCard = ({ job, isCollected, onToggleCollect, onExport, index }) => {
                 { l: '经验要求', v: job.experience_required || '-' },
                 { l: '学历要求', v: job.education_required || '-' },
                 { l: '技能数量', v: `${skills.length} 项` },
-                { l: '岗位ID', v: `#${job.id}` },
+                { l: '数据来源', v: job.source_type === 'seed' ? '人工核验' : '我导入的' },
               ].map((item, i) => (
                 <div key={i} className="rounded-xl p-3" style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.04)' }}>
                   <p className="text-[11px]" style={{ color: 'rgba(255,255,255,0.28)' }}>{item.l}</p>
@@ -482,6 +493,29 @@ const JobCard = ({ job, isCollected, onToggleCollect, onExport, index }) => {
                 </div>
               </div>
             )}
+            {/* 来源与操作：有原始链接就给出，可核验；自己导入的可删除 */}
+            <div className="mt-5 flex flex-wrap items-center gap-2">
+              {job.source_url ? (
+                <a href={job.source_url} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-primary/80 hover:text-primary transition-colors"
+                  style={{ background: 'rgba(108,123,255,0.07)', border: '1px solid rgba(108,123,255,0.18)' }}>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  查看原始岗位页面
+                </a>
+              ) : (
+                <span className="text-[11px]" style={{ color: 'rgba(255,255,255,0.22)' }}>
+                  这条岗位来自你粘贴的 JD，没有外部链接
+                </span>
+              )}
+              {job.source_type === 'user_import' && onDelete && (
+                <button onClick={() => onDelete(job)}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-red-300/70 hover:text-red-300 transition-colors ml-auto"
+                  style={{ background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)' }}>
+                  <Trash2 className="w-3.5 h-3.5" />
+                  删除这条
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -602,6 +636,271 @@ const Pagination = ({ current, total, pageSize, onChange }) => {
   )
 }
 
+// ===== 子组件：导入 JD 弹窗 =====
+//
+// 为什么要有这一步：国内招聘站抓不到结构化数据，但求职者手上本来就有 JD。
+// 复制粘贴 -> 自动识别 -> 缺的自己补 -> 入库，数据 100% 真实且实时。
+// 识别不准的字段一律留空让用户补，不猜、不编。
+const ImportJobModal = ({ onClose, onImported }) => {
+  const [step, setStep] = useState('input')   // input: 粘贴 / confirm: 校对
+  const [rawText, setRawText] = useState('')
+  const [parsing, setParsing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [missing, setMissing] = useState([])
+  const [warnings, setWarnings] = useState([])
+  const [confidence, setConfidence] = useState(null)
+  const [skillInput, setSkillInput] = useState('')
+  const [form, setForm] = useState({
+    title: '', company: '', city: '', salary_min: '', salary_max: '',
+    experience_required: '', education_required: '', industry: '',
+    source_url: '', skills_required: [],
+  })
+
+  const set = (key, val) => setForm(prev => ({ ...prev, [key]: val }))
+
+  const handleParse = async () => {
+    if (!rawText.trim()) { setError('先把岗位描述粘贴进来'); return }
+    setParsing(true); setError('')
+    try {
+      const res = await parseJD(rawText)
+      if (!res.ok) { setError(res.message || '这段内容识别不了，请检查是否粘贴完整'); return }
+      const d = res.data
+      setForm({
+        title: d.title || '', company: d.company || '', city: d.city || '',
+        salary_min: d.salary_min ?? '', salary_max: d.salary_max ?? '',
+        experience_required: d.experience_required || '',
+        education_required: d.education_required || '',
+        industry: d.industry || '', source_url: d.source_url || '',
+        skills_required: d.skills_required || [],
+      })
+      setMissing(res.missing_fields || [])
+      setWarnings(res.warnings || [])
+      setConfidence(res.confidence || null)
+      setStep('confirm')
+    } catch (e) {
+      setError(e?.response?.data?.message || e.message || '识别失败，请检查网络后重试')
+    } finally { setParsing(false) }
+  }
+
+  const handleSave = async () => {
+    if (!form.title.trim()) { setError('岗位名称不能为空'); return }
+    setSaving(true); setError('')
+    try {
+      const res = await importJob({
+        raw_text: rawText,
+        ...form,
+        salary_min: form.salary_min === '' ? null : Number(form.salary_min),
+        salary_max: form.salary_max === '' ? null : Number(form.salary_max),
+      })
+      if (res.code === 0) { onImported?.(res.data); onClose() }
+      else if (res.code === 1) setError('这个岗位已经在库里了，没有重复添加')
+      else setError(res.message || '保存失败')
+    } catch (e) {
+      setError(e?.response?.data?.message || e.message || '保存失败，请稍后重试')
+    } finally { setSaving(false) }
+  }
+
+  const addSkill = () => {
+    const v = skillInput.trim()
+    if (!v) return
+    if (form.skills_required.includes(v)) { setSkillInput(''); return }
+    set('skills_required', [...form.skills_required, v])
+    setSkillInput('')
+  }
+
+  const removeSkill = (s) => set('skills_required', form.skills_required.filter(x => x !== s))
+
+  const needs = (key) => missing.includes(key)
+
+  const fieldClass = (key) =>
+    `input-dark w-full px-3 py-2.5 text-sm ${needs(key) ? 'ring-1 ring-amber-400/30' : ''}`
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+
+      <div className="relative w-full max-w-2xl glass-card overflow-visible my-auto">
+        <div className="p-5 sm:p-6">
+          {/* Header */}
+          <div className="flex items-start justify-between mb-5">
+            <div>
+              <h2 className="text-lg font-bold text-white/92 flex items-center gap-2.5">
+                <ClipboardPaste className="w-5 h-5 text-primary" />
+                {step === 'input' ? '粘贴岗位 JD' : '确认识别结果'}
+              </h2>
+              <p className="text-xs mt-1" style={{ color: 'rgba(255,255,255,0.32)' }}>
+                {step === 'input'
+                  ? '从 BOSS、拉勾、牛客或公司招聘页复制岗位描述，直接粘进来'
+                  : '下面是自动识别出的字段，识别不到或识别错的直接改'}
+              </p>
+            </div>
+            <button onClick={onClose} className="p-2 hover:bg-white/[0.06] rounded-xl transition-colors -mt-1">
+              <X className="w-5 h-5 text-white/40" />
+            </button>
+          </div>
+
+          {error && (
+            <div className="mb-4 px-3 py-2.5 rounded-xl text-xs flex items-start gap-2"
+              style={{ background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)', color: 'rgba(252,165,165,0.9)' }}>
+              <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {step === 'input' ? (
+            <>
+              <textarea
+                value={rawText}
+                onChange={e => setRawText(e.target.value)}
+                placeholder={'把岗位描述整段粘贴到这里，例如：\n\n后端开发工程师\n25-40K\n杭州 3-5年 本科\n岗位职责：\n1、负责……\n任职要求：\n1、熟悉 Java、MySQL……'}
+                rows={12}
+                className="input-dark w-full px-4 py-3 text-sm leading-relaxed resize-y"
+              />
+              <div className="flex items-center justify-between mt-3">
+                <span className="text-[11px]" style={{ color: 'rgba(255,255,255,0.25)' }}>
+                  {rawText.length > 0 ? `已输入 ${rawText.length} 字` : '只需要岗位描述正文，不用整页复制'}
+                </span>
+                <button onClick={handleParse} disabled={parsing || !rawText.trim()}
+                  className="flex items-center gap-2 px-5 py-2.5 btn-primary-grad text-sm font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed">
+                  {parsing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  {parsing ? '识别中…' : '识别字段'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* 识别质量提示 */}
+              <div className="mb-4 px-3 py-2.5 rounded-xl text-xs flex items-start gap-2"
+                style={{
+                  background: missing.length <= 1 ? 'rgba(52,211,153,0.06)' : 'rgba(245,158,11,0.06)',
+                  border: `1px solid ${missing.length <= 1 ? 'rgba(52,211,153,0.18)' : 'rgba(245,158,11,0.18)'}`,
+                  color: missing.length <= 1 ? 'rgba(110,231,183,0.85)' : 'rgba(251,191,36,0.8)',
+                }}>
+                {missing.length <= 1 ? <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /> : <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />}
+                <span>
+                  {confidence?.label || '识别完成'}
+                  {missing.length > 0 && `：${missing.map(m => ({
+                    title: '岗位名称', company: '公司', city: '城市', salary: '薪资',
+                    experience_required: '经验要求', education_required: '学历要求',
+                    skills_required: '技能',
+                  }[m] || m)).join('、')}没识别出来，请手动补一下`}
+                </span>
+              </div>
+
+              {warnings.length > 0 && (
+                <div className="mb-4 px-3 py-2 rounded-xl text-[11px] space-y-1"
+                  style={{ background: 'rgba(255,255,255,0.03)', color: 'rgba(255,255,255,0.4)' }}>
+                  {warnings.map((w, i) => <p key={i}>· {w}</p>)}
+                </div>
+              )}
+
+              {/* 可编辑字段 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>岗位名称 *</label>
+                  <input value={form.title} onChange={e => set('title', e.target.value)}
+                    placeholder="如：后端开发工程师" className={fieldClass('title')} />
+                </div>
+
+                <div>
+                  <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>公司</label>
+                  <input value={form.company} onChange={e => set('company', e.target.value)}
+                    placeholder="招聘公司名称" className={fieldClass('company')} />
+                </div>
+
+                <div>
+                  <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>城市</label>
+                  <input value={form.city} onChange={e => set('city', e.target.value)}
+                    placeholder="如：杭州" className={fieldClass('city')} />
+                </div>
+
+                <div>
+                  <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>月薪下限（K）</label>
+                  <input type="number" value={form.salary_min} onChange={e => set('salary_min', e.target.value)}
+                    placeholder="如 20" className={fieldClass('salary')} />
+                </div>
+
+                <div>
+                  <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>月薪上限（K）</label>
+                  <input type="number" value={form.salary_max} onChange={e => set('salary_max', e.target.value)}
+                    placeholder="如 35" className={fieldClass('salary')} />
+                </div>
+
+                <div>
+                  <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>经验要求</label>
+                  <input value={form.experience_required} onChange={e => set('experience_required', e.target.value)}
+                    placeholder="如：3-5年 / 应届" className={fieldClass('experience_required')} />
+                </div>
+
+                <div>
+                  <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>学历要求</label>
+                  <input value={form.education_required} onChange={e => set('education_required', e.target.value)}
+                    placeholder="如：本科" className={fieldClass('education_required')} />
+                </div>
+
+                <div>
+                  <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>行业</label>
+                  <input value={form.industry} onChange={e => set('industry', e.target.value)}
+                    placeholder="如：互联网" className="input-dark w-full px-3 py-2.5 text-sm" />
+                </div>
+
+                <div>
+                  <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>原始链接（可选）</label>
+                  <input value={form.source_url} onChange={e => set('source_url', e.target.value)}
+                    placeholder="岗位页面地址" className="input-dark w-full px-3 py-2.5 text-sm" />
+                </div>
+              </div>
+
+              {/* 技能 */}
+              <div className="mt-3">
+                <label className="text-[11px] mb-1.5 block" style={{ color: 'rgba(255,255,255,0.35)' }}>
+                  技能要求 {needs('skills_required') && <span className="text-amber-400/70">（一条都没识别到，手动加几个）</span>}
+                </label>
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {form.skills_required.map((s, i) => (
+                    <span key={i} className="skill-tag text-[11px] flex items-center gap-1">
+                      {s}
+                      <button onClick={() => removeSkill(s)} className="hover:text-red-300">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                  {form.skills_required.length === 0 && (
+                    <span className="text-[11px]" style={{ color: 'rgba(255,255,255,0.2)' }}>暂无</span>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <input value={skillInput} onChange={e => setSkillInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSkill() } }}
+                    placeholder="输入技能后回车添加，如 Redis"
+                    className="input-dark flex-1 px-3 py-2 text-sm" />
+                  <button onClick={addSkill} className="px-3 py-2 tag-glass rounded-xl text-sm">
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center gap-2 mt-6 pt-4 border-t" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+                <button onClick={() => { setStep('input'); setError('') }}
+                  className="px-4 py-2.5 text-sm font-medium rounded-xl btn-glass text-white/60 hover:text-white transition-all">
+                  返回修改原文
+                </button>
+                <button onClick={handleSave} disabled={saving}
+                  className="flex items-center gap-2 px-5 py-2.5 btn-primary-grad text-sm font-semibold text-white ml-auto disabled:opacity-40">
+                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                  {saving ? '保存中…' : '保存到资料库'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ===== 主组件 =====
 const JobsPage = () => {
   const navigate = useNavigate()
@@ -627,6 +926,7 @@ const JobsPage = () => {
     catch { return new Set() }
   })
   const [showCollection, setShowCollection] = useState(false)
+  const [showImport, setShowImport] = useState(false)
 
   useEffect(() => { localStorage.setItem('offer-hunter-collected', JSON.stringify([...collected])) }, [collected])
 
@@ -645,6 +945,22 @@ const JobsPage = () => {
   }, [])
 
   useEffect(() => { fetchJobs() }, [fetchJobs])
+
+  // 删除自己导入的岗位（预置核验岗位后端会拒绝）
+  const handleDeleteJob = useCallback(async (job) => {
+    if (!window.confirm(`确定从资料库删除「${job.title}」吗？`)) return
+    try {
+      const res = await deleteJob(job.id)
+      if (res.code === 0) {
+        setAllJobs(prev => prev.filter(j => j.id !== job.id))
+        setCollected(prev => { const next = new Set(prev); next.delete(job.id); return next })
+      } else {
+        alert(res.message || '删除失败')
+      }
+    } catch (e) {
+      alert(e?.response?.data?.message || '删除失败，请稍后重试')
+    }
+  }, [])
 
   // Filter logic — 智能关键词匹配 + 字段级筛选
   const { filteredJobs, searchMatched } = useMemo(() => {
@@ -726,11 +1042,14 @@ const JobsPage = () => {
   // Stats
   const stats = useMemo(() => {
     const industries = {}, cities = {}
+    let verified = 0, imported = 0
     allJobs.forEach(job => {
       if (job.industry) industries[job.industry] = (industries[job.industry] || 0) + 1
       if (job.city) cities[job.city] = (cities[job.city] || 0) + 1
+      if (job.source_type === 'seed') verified++
+      else if (job.source_type === 'user_import') imported++
     })
-    return { industries, cities }
+    return { industries, cities, verified, imported }
   }, [allJobs])
 
   const toggleCollect = useCallback((jobId) => {
@@ -764,10 +1083,16 @@ const JobsPage = () => {
             岗位浏览
           </h1>
           <p className="text-sm mt-1.5" style={{ color: 'rgba(255,255,255,0.32)' }}>
-            浏览全部岗位数据，搜索、筛选、收藏你感兴趣的职位
+            每条岗位都标了来源：公开渠道核验的，或你自己粘贴的 JD
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <button onClick={() => setShowImport(true)}
+            className="flex items-center gap-2 px-4 py-2.5 glass-card btn-glass text-sm font-medium text-white/70 hover:text-white/90"
+          >
+            <Plus className="w-4 h-4" />
+            导入 JD
+          </button>
           <button onClick={() => setShowCollection(true)}
             className="flex items-center gap-2 px-4 py-2.5 glass-card btn-glass text-sm font-medium text-white/70 hover:text-white/90"
           >
@@ -790,7 +1115,9 @@ const JobsPage = () => {
 
       {/* Stats bar */}
       <div className="mb-6 animate-fade-up delay-1">
-        <StatsBar total={allJobs.length} filtered={filteredJobs.length} industries={stats.industries} cities={stats.cities} />
+        <StatsBar total={allJobs.length} filtered={filteredJobs.length}
+          verified={stats.verified} imported={stats.imported}
+          industries={stats.industries} cities={stats.cities} />
       </div>
 
       {/* Search bar — Glass Style */}
@@ -913,10 +1240,21 @@ const JobsPage = () => {
       {!loading && !error && sortedJobs.length === 0 && (
         <div className="glass-card p-16 text-center">
           <Search className="w-16 h-16 mx-auto mb-5" style={{ color: 'rgba(255,255,255,0.1)' }} />
-          <h3 className="text-lg font-semibold text-white/60 mb-2">未找到匹配的岗位</h3>
+          <h3 className="text-lg font-semibold text-white/60 mb-2">
+            {searchTerm || Object.values(filters).some(v => v) ? '未找到匹配的岗位' : '资料库还是空的'}
+          </h3>
           <p className="text-sm mb-6" style={{ color: 'rgba(255,255,255,0.25)' }}>
-            {searchTerm || Object.values(filters).some(v => v) ? '试试调整搜索关键词或筛选条件' : '当前数据库中没有岗位数据'}
+            {searchTerm || Object.values(filters).some(v => v)
+              ? '试试调整搜索关键词或筛选条件'
+              : '把你正在看的岗位 JD 粘贴进来，就有了第一条真实数据'}
           </p>
+          {!(searchTerm || Object.values(filters).some(v => v)) && (
+            <button onClick={() => setShowImport(true)}
+              className="inline-flex items-center gap-2 px-5 py-2.5 btn-primary-grad text-sm font-semibold text-white">
+              <Plus className="w-4 h-4" />
+              导入 JD
+            </button>
+          )}
           {(searchTerm || Object.values(filters).some(v => v)) && (
             <button onClick={() => { setSearchTerm(''); setFilters({ industry:'', city:'', experience:'', education:'', salaryMin:'', salaryMax:'', skills:'' }) }}
               className="px-6 py-2.5 btn-glass text-sm font-medium"
@@ -941,7 +1279,7 @@ const JobsPage = () => {
         <div className="space-y-4 animate-fade-up">
           {pagedJobs.map((job, i) => (
             <JobCard key={job.id} job={job} index={i} isCollected={collected.has(job.id)}
-              onToggleCollect={toggleCollect} onExport={exportJob} />
+              onToggleCollect={toggleCollect} onExport={exportJob} onDelete={handleDeleteJob} />
           ))}
         </div>
       )}
@@ -955,6 +1293,17 @@ const JobsPage = () => {
       {showCollection && (
         <CollectionDrawer collected={collected} jobs={allJobs} onToggleCollect={toggleCollect}
           onExportAll={exportAllCollected} onClose={() => setShowCollection(false)}
+        />
+      )}
+
+      {/* 导入 JD 弹窗 */}
+      {showImport && (
+        <ImportJobModal
+          onClose={() => setShowImport(false)}
+          onImported={(job) => {
+            if (job) setAllJobs(prev => prev.some(j => j.id === job.id) ? prev : [...prev, job])
+            else fetchJobs()
+          }}
         />
       )}
     </main>
