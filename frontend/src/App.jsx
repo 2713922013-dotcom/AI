@@ -81,6 +81,12 @@ function App() {
     }
   }, [analysisData])
 
+  // 免费部署（Render）在无人访问时会休眠，冷启动要 50 秒以上。
+  // 用户一打开网站就发一个预热请求，等他真正点「分析/开始面试」时服务器已经醒了
+  useEffect(() => {
+    fetch('/api/health').catch(() => {})
+  }, [])
+
   return (
     <div className="min-h-screen bg-[#050816]">
       <ErrorBoundary>

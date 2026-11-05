@@ -374,10 +374,10 @@ const HomePage = ({ onAnalysisComplete }) => {
       if (res?.data) {
         const d = res.data
         setStatsData([
-          { value: `${d.total_jobs || 1000}+`, label: '岗位数据', suffix: '' },
-          { value: `${d.industries?.length || d.industries_count || 20}`, label: '行业覆盖', suffix: '' },
-          { value: `${d.cities?.length || d.cities_count || 27}`, label: '城市覆盖', suffix: '' },
-          { value: '92', label: '匹配准确率', suffix: '%' },
+          { value: `${d.total_jobs ?? 0}`, label: '核验真实岗位', suffix: '' },
+          { value: `${d.companies?.length ?? d.companies_count ?? 0}`, label: '覆盖公司', suffix: '' },
+          { value: `${d.cities?.length ?? d.cities_count ?? 0}`, label: '覆盖城市', suffix: '' },
+          { value: `${d.imported_jobs ?? 0}`, label: '用户导入 JD', suffix: '' },
         ])
       }
     }).catch(() => {})
@@ -414,8 +414,15 @@ const HomePage = ({ onAnalysisComplete }) => {
     } catch (err) {
       // 不用 alert：把后端给的原因和改进建议直接显示在按钮下方
       const payload = err.response?.data
+      let message = payload?.message || err.message || '分析失败，请稍后重试'
+      // 免费部署休眠后的冷启动超时，翻译成人话
+      if (err?.code === 'ECONNABORTED' || /timeout/i.test(message)) {
+        message = '服务器唤醒超时。免费部署在没人访问时会休眠，第一次请求要等它启动——请再点一次「开始分析」，第二次会很快。'
+      } else if (/network error/i.test(message)) {
+        message = '连不上服务器，请检查网络后重试。'
+      }
       setError({
-        message: payload?.message || err.message || '分析失败，请稍后重试',
+        message,
         hints: payload?.data?.hints || [],
         isOcr: payload?.data?.type === 'needs_ocr',
       })

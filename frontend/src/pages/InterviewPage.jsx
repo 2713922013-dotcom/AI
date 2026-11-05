@@ -6,6 +6,18 @@ import {
 } from 'lucide-react'
 import { analyzeResume, buildInterviewPlan, scoreInterviewAnswer } from '../services/api'
 
+// 把 axios 的英文报错翻译成用户能懂、知道下一步该做什么的话
+function friendlyError(e) {
+  const msg = e?.response?.data?.message || e?.message || ''
+  if (e?.code === 'ECONNABORTED' || /timeout/i.test(msg)) {
+    return '服务器唤醒超时。免费部署在没人访问时会休眠，第一次请求要等它启动——请再点一次「开始面试」，第二次会很快。'
+  }
+  if (/network error/i.test(msg) || e?.response === undefined) {
+    return '连不上服务器，请检查网络后重试。'
+  }
+  return msg || '启动失败，请稍后重试'
+}
+
 const CATEGORY_STYLE = {
   '自我介绍': { color: '#6C7BFF', bg: 'rgba(108,123,255,0.12)' },
   '项目深挖': { color: '#38BDF8', bg: 'rgba(56,189,248,0.12)' },
@@ -129,7 +141,7 @@ export default function InterviewPage() {
       setSeconds(0)
       setPhase('quiz')
     } catch (e) {
-      setError(e?.response?.data?.message || e.message || '启动失败，请稍后重试')
+      setError(friendlyError(e))
     } finally {
       setLoading(false)
       setStatus('')
@@ -160,7 +172,7 @@ export default function InterviewPage() {
       setResult(r)
       setRecords(prev => [...prev, { question, answer, result: r, seconds }])
     } catch (e) {
-      setError(e?.response?.data?.message || e.message || '评分失败')
+      setError(friendlyError(e))
     } finally {
       setLoading(false)
     }
@@ -295,6 +307,18 @@ export default function InterviewPage() {
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
             {loading ? (status || '准备中…') : '开始面试'}
           </button>
+
+          {loading && (
+            <div className="flex items-start gap-2 p-3 rounded-xl text-sm"
+              style={{ background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.18)', color: '#FCD34D' }}>
+              <Loader2 className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" style={{ color: '#F59E0B' }} />
+              <span>
+                {status || '准备中…'}
+                {file ? ' · 上传了简历会先解析再出题' : ''}
+                ，第一次访问如果赶上服务器休眠，可能需要 30–60 秒，请不要关闭页面。
+              </span>
+            </div>
+          )}
         </div>
       </div>
     )
