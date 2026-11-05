@@ -30,8 +30,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import llm
 import llm_agents
+import interview
 
-ENGINE_VERSION = "3.4.0"  # 单一版本号来源，health 与 analyze 共用，避免两处不一致
+ENGINE_VERSION = "3.5.0"  # 单一版本号来源，health 与 analyze 共用，避免两处不一致
 
 app = FastAPI(title="Offer Hunter API", version=ENGINE_VERSION)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -132,6 +133,44 @@ def extract_pdf_text(pdf_bytes):
 # ============================================================
 # Step 2: 内容清洗
 # ============================================================
+_SECTION_LABEL_CACHE = None
+
+
+def _all_section_labels():
+    """所有章节标题（小写）集合。用于保护短标题不被断行合并吃掉。"""
+    global _SECTION_LABEL_CACHE
+    if _SECTION_LABEL_CACHE is None:
+        labels = set()
+        for cfg in SECTION_KEYWORDS.values():
+            for lb in cfg.get("labels", []):
+                labels.add(lb.strip().lower())
+        _SECTION_LABEL_CACHE = labels
+    return _SECTION_LABEL_CACHE
+
+
+def _split_trailing_section_label(line):
+    """把挤在同一行末尾的章节标题拆出来。
+
+    双栏排版和跨页拼接常出现 "…MySQL、Linux项目经历" 这种行，
+    标题行长度超过阈值就识别不到，整段章节都会丢。
+
+    注意只认「长标题」（项目经历/专业技能/Education 这种），
+    否则「实验室项目」「课程设计项目」会被从「项目」处劈开。
+    """
+    if not line or len(line) <= 6:
+        return [line]
+    lowered = line.lower()
+    for label in sorted(_all_section_labels(), key=len, reverse=True):
+        # 中文至少 4 字、英文至少 6 字母，才算有辨识度的标题
+        if len(label) < 4:
+            continue
+        if lowered.endswith(label):
+            head = line[: len(line) - len(label)].strip()
+            if len(head) >= 4 and not head.endswith(("：", ":")):
+                return [head, line[len(line) - len(label):].strip()]
+    return [line]
+
+
 def clean_resume_text(raw_text):
     """
     Step 2: 清洗 PDF 提取的原始文本
@@ -178,8 +217,12 @@ def clean_resume_text(raw_text):
         if len(stripped) > 3 and printable_chars < len(stripped) * 0.4:
             continue
         
-        # 与上一行合并短行（可能是断词）
-        if len(stripped) <= 6 and prev_line and not prev_line.endswith(('。', '.', '!', '?', '！', '？', ':', '：')):
+        # 与上一行合并短行（可能是 PDF 断词，例如 "A/B测" + "试"）
+        # 但章节标题本身就很短（"项目经历"/"科研经历"），绝不能并进上一行，
+        # 否则后面按标题切分章节时会整段丢失。
+        if (len(stripped) <= 6 and prev_line
+                and not prev_line.endswith(('。', '.', '!', '?', '！', '？', ':', '：'))
+                and stripped.lower() not in _all_section_labels()):
             cleaned_lines[-1] += stripped
             prev_line = cleaned_lines[-1]
             continue
@@ -188,6 +231,12 @@ def clean_resume_text(raw_text):
         prev_line = stripped
     
     result = '\n'.join(cleaned_lines)
+
+    # 标题与上一行挤在一起时拆开（跨页拼接、双栏排版常见）
+    split_lines = []
+    for line in result.split('\n'):
+        split_lines.extend(_split_trailing_section_label(line))
+    result = '\n'.join(split_lines)
     
     # 全局清理
     result = re.sub(r'[^\S\n]+', ' ', result)          # 多空格变单空格
@@ -254,37 +303,51 @@ def detect_sections(cleaned_text):
     for i, line in enumerate(lines):
         detected_type = None
         best_score = 0
-        
+        title_rest = ""
+        lower_line = line.lower()
+
         # 检测每个章节类型的标题
         for sec_type, config in SECTION_KEYWORDS.items():
             for label in config['labels']:
-                if label.lower() in line.lower() and len(line) <= 20:
-                    # 标题特征检查：通常是短行+冒号/无正文
-                    score = config['weight']
-                    # 如果有分隔符加分
-                    if any(s in line for s in [':', '：', '|', '/', '  ', '\t']):
-                        score *= 1.1
-                    # 如果全是大写或首字母大写的英文字母加分
-                    if re.match(r'^[A-Z][a-zA-Z\s/:]+$', line) or re.match(r'^[\u4e00-\u9fff]{2,8}$', line):
-                        score *= 1.05
-                    
-                    if score > best_score:
-                        best_score = score
-                        detected_type = sec_type
-                        break
-        
+                if len(line) > 20:
+                    break
+                pos = lower_line.find(label.lower())
+                if pos < 0:
+                    continue
+                # 标题必须出现在行首（允许 "1." "·" 之类的前缀），
+                # 否则「2023年 研究生学业奖学金一等奖」会被当成标题，条目本身丢掉
+                if pos > 3:
+                    continue
+                rest = line[pos + len(label):].strip(' ：:|/·-—')
+                if len(rest) > 6:
+                    continue
+
+                score = config['weight']
+                # 如果有分隔符加分
+                if any(s in line for s in [':', '：', '|', '/', '  ', '\t']):
+                    score *= 1.1
+                # 如果全是大写或首字母大写的英文字母加分
+                if re.match(r'^[A-Z][a-zA-Z\s/:]+$', line) or re.match(r'^[\u4e00-\u9fff]{2,8}$', line):
+                    score *= 1.05
+
+                if score > best_score:
+                    best_score = score
+                    detected_type = sec_type
+                    title_rest = rest
+                    break
+
         if detected_type and best_score >= 0.5:
             # 保存上一个章节
             if current_section['lines']:
                 current_section['end'] = i - 1
                 sections.append(current_section)
-            
+
             current_section = {
                 'type': detected_type,
                 'title': line,
                 'start': i,
                 'end': i,
-                'lines': [],
+                'lines': [title_rest] if title_rest else [],
             }
             if detected_type not in section_order:
                 section_order.append(detected_type)
@@ -322,6 +385,10 @@ def detect_sections(cleaned_text):
 DATE_RANGE_RE = re.compile(
     r'((?:19|20)\d{2}\s*[.\-/年]\s*\d{1,2}\s*月?\s*[-–—~～至到]\s*'
     r'(?:(?:19|20)\d{2}\s*[.\-/年]\s*\d{1,2}\s*月?|至今|现在|今))'
+)
+DATE_RANGE_ANY = re.compile(
+    r'((?:(?:19|20)\d{2}(?:[.\-/年]\s*\d{1,2}\s*月?)?)\s*[-–—~～至到]\s*'
+    r'(?:(?:19|20)\d{2}(?:[.\-/年]\s*\d{1,2}\s*月?)?|至今|现在|今))'
 )
 POSITION_HINTS = (
     '实习生', '工程师', '经理', '助理', '专员', '主管', '总监', '设计师',
@@ -373,6 +440,83 @@ def parse_exp_header(header):
     return rec
 
 
+def _split_skill_tokens(text):
+    """按分隔符切技能条目。
+
+    斜杠要小心：「Excel/PPT」应当切开，而「A/B测试」「TCP/IP」切开就废了。
+    规则：斜杠两侧都至少有 2 个字符时才拆。
+    """
+    out = []
+    for chunk in re.split(r'[、,，;；|｜•\n]+', text):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if '/' in chunk:
+            parts = [p.strip() for p in chunk.split('/')]
+            if all(len(p) >= 2 for p in parts if p):
+                out.extend(p for p in parts if p)
+                continue
+        out.append(chunk)
+    return out
+
+
+def _records_without_sections(text, max_items=4, exclude=""):
+    """没有章节标题的简历（纯段落式排版）：按「日期区间开头的行」切块推断经历。
+
+    只认以日期开头的行，避免把「负责xxx」这类正文行当成新记录。
+    """
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    date_idx = [i for i, l in enumerate(lines) if DATE_RANGE_ANY.search(l[:30])]
+    records = []
+    for n, i in enumerate(date_idx):
+        head = lines[i]
+        if exclude and re.search(exclude, head, re.I):
+            continue
+        end = date_idx[n + 1] if n + 1 < len(date_idx) else len(lines)
+        rec = parse_exp_header(head)
+        desc = [l for l in lines[i + 1:end] if len(l) > 8]
+        if desc:
+            rec["description"] = '\n'.join(desc[:4])
+        if rec.get("company") or rec.get("position"):
+            records.append(rec)
+        if len(records) >= max_items:
+            break
+    return records
+
+
+_NAME_STOPWORDS = re.compile(
+    r'求职|意向|简历|个人|应聘|姓名|电话|手机|邮箱|地址|教育|技能|项目|工作|实习|'
+    r'荣誉|奖项|证书|自我|评价|信息|联系|经历|背景|意向岗位|@|\d'
+)
+
+_CJK_NAME_RE = re.compile(r'^[\u4e00-\u9fa5·]{2,4}$')
+_EN_NAME_RE = re.compile(r'^[A-Z][A-Za-z.\-]*(?:\s+[A-Z][A-Za-z.\-]*){1,2}$')
+
+
+def _guess_name_from_head(lines, scan=6):
+    """简历首行通常就是姓名。中文 2-4 字、英文 2-3 个首字母大写单词。"""
+    for line in lines[:scan]:
+        s = line.strip()
+        if not s or len(s) > 30:
+            continue
+        if _NAME_STOPWORDS.search(s):
+            continue
+        if _CJK_NAME_RE.match(s):
+            return s
+        if _EN_NAME_RE.match(s) and len(s) <= 30:
+            return s
+    return ""
+
+
+def _normalize_phone_text(text):
+    """把 138-0000-1234 / 138 0000 1234 / +86 137 0000 8888 归一成连续 11 位。
+
+    只处理「1[3-9] + 4 + 4」这种手机号结构，不会碰日期区间，避免误伤。
+    """
+    return re.sub(r'(?<!\d)(1[3-9]\d)[\s\-－—–]?(\d{4})[\s\-－—–]?(\d{4})(?!\d)',
+                  r'\1\2\3', text)
+
+
 def structured_extract(cleaned_text, sections_result, target_position=""):
     """
     Step 4: 结构化提取 — 正则+规则为主，输出标准 JSON
@@ -406,32 +550,30 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
     full_text_lower = text.lower()
     
     # ---- 基本信息提取 ----
-    # 姓名: 通常在最前面的几行，2-4个字
-    name_patterns = [
-        r'姓\s*名[：:\s]*([^\s\n]{2,4})',
-        r'^([^\s\n]{2,4})\s*(?:男|女|求职|应聘)',
-        r'候选人[：:\s]*([^\s\n]{2,4})',
-        r'(?:个人)?简介[：:\s]*\n?\s*([^\s\n]{2,4})',
-        r'^([^\s\d\n]{2,4})$',
-    ]
-    for p in name_patterns:
+    # 姓名：先认显式标签写法，再回退到「首行即姓名」的常见排版。
+    # 老实现把 ^...$ 当成整篇匹配，导致 2 字姓名（陈浩/赵雪）全部识别失败。
+    info["name"] = ""
+    for p in (r'姓\s*名[：:\s]*([^\s\n]{2,20})', r'候选人[：:\s]*([^\s\n]{2,20})'):
         m = re.search(p, text)
-        if m and m.group(1):
+        if m:
             candidate = m.group(1).strip()
-            # 过滤掉明显不是姓名的内容
-            if not any(kw in candidate for kw in ['电话','邮箱','地址','邮箱','http','www','.com','@']):
+            if 2 <= len(candidate) <= 20 and not _NAME_STOPWORDS.search(candidate):
                 info["name"] = candidate
                 break
+    if not info["name"]:
+        info["name"] = _guess_name_from_head(lines)
+
     
     # 邮箱
     email_m = re.search(r'[\w.\-+]+@[\w\-]+\.[\w.\-]+', text)
     if email_m:
         info["email"] = email_m.group(0).strip()
     
-    # 手机号
-    phone_m = re.search(r'(?:手机|电话|tel|phone|联系)[：:\s]*(1[3-9]\d{9})', text, re.I)
+    # 手机号（支持 138-0000-1234 / 138 0000 1234 / +86 前缀）
+    phone_text = _normalize_phone_text(text)
+    phone_m = re.search(r'(?:手机|电话|tel|phone|联系)[：:\s]*(1[3-9]\d{9})', phone_text, re.I)
     if not phone_m:
-        phone_m = re.search(r'(?<![0-9])(1[3-9]\d{9})(?![0-9])', text)
+        phone_m = re.search(r'(?<![0-9])(1[3-9]\d{9})(?![0-9])', phone_text)
     if phone_m:
         info["phone"] = phone_m.group(1)
     
@@ -444,9 +586,11 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
     
     # ---- 学校提取（增强版）----
     school_patterns = [
-        r'(?:毕业(?:院校)?|就读|学校|University|学院|本科院校|研究生院)[：:\s]*([^\s\n,，;；]{4,30}(?:大学|学院|School))',
+        # 英文校名含空格（Fudan University / New York University），必须整体匹配
+        r'([A-Z][A-Za-z&.\-]*(?:\s+[A-Za-z&.\-]+){0,4}\s+(?:University|College|Institute|School))',
+        r'(?:毕业(?:院校)?|就读|学校|University|学院|本科院校|研究生院)[：:\s]*([^\s\n,，;；]{4,30}(?:大学|学院|School|University|College|Institute))',
         r'((?:北京|上海|广州|深圳|武汉|南京|杭州|成都|西安|天津|重庆|哈尔滨|大连|厦门|山东|中国|华中|华南|华北|华东|西南|中南|电子科技|[A-Z])[^\s\n,，;；]{2,25}(?:大学|学院|学校|School))',
-        r'([\u4e00-\u9fff]{2,20}(?:大学|学院|School))',
+        r'([\u4e00-\u9fff]{2,20}(?:大学|学院|School|University|College|Institute))',
     ]
     for p in school_patterns:
         m = re.search(p, text)
@@ -557,6 +701,17 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
         loose_major = re.search(r'(?:专业|方向)[^。\n]{0,8}?[:：]?\s*([^\s\n,，;；]{2,12}(?:工程|科学|技术|管理|设计|学|经济|传媒))', text)
         if loose_major:
             info["major"] = loose_major.group(1).strip()
+
+    # 英文简历：学校名与学位之间的那段就是专业
+    # 例：2016.09 - 2020.06  Fudan University  Statistics  Bachelor
+    if not info["major"]:
+        en_major = re.search(
+            r'(?:University|College|Institute)\s+([A-Z][A-Za-z&,\s]{2,30}?)\s+'
+            r'(?:Bachelor|Master|PhD|Ph\.D|B\.S|M\.S|BS|MS|BSc|MSc)',
+            text,
+        )
+        if en_major:
+            info["major"] = en_major.group(1).strip(' ,')
     
     # ---- 学历 ----
     edu_map = {'博士研究生':'博士', '博士':'博士', '硕士':'硕士', '研究生':'硕士',
@@ -570,30 +725,34 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
         info["education"] = "本科"
         info["education_level"] = "本科"
     
-    # ---- 毕业年份（增强版）----
-    year_m = re.search(r'(?:毕业(?:时间|年份)|预计毕业|Graduation|届)[：:\s]*(20\d{2})', text, re.I)
-    if not year_m:
-        year_m = re.search(r'(20\d{2})(?:年?)\s*(?:毕|毕业|届)', text)
-    if not year_m:
-        years = re.findall(r'(20(?:2[5-9]|[3-9]\d))(?:年|届)', text)
-        if years:
-            info["graduation_year"] = years[-1]
-    elif year_m:
-        info["graduation_year"] = year_m.group(1)
-    
-    # 从教育记录的时间范围提取
-    if not info["graduation_year"] and info["education_records"]:
-        for rec in info["education_records"]:
-            tr = rec.get("time_range", "")
-            # 2022-2026 或 2022.09-2026.06 等格式
-            year_end = re.search(r'[-–—~～]\s*(20\d{2})', tr)
-            if year_end:
-                info["graduation_year"] = year_end.group(1)
+    # ---- 毕业年份 ----
+    # 顺序：显式写法 → 教育章节内最大年份（在读生取预计毕业年）→ 含学校的那一行
+    # 注意：此处 education_records 还没解析，不能用它兜底（老版本就卡在这）
+    gy = ""
+    m = re.search(r'(?:毕业(?:时间|年份)|预计毕业|Graduation|届)[：:\s]*(20\d{2})', text, re.I)
+    if m:
+        gy = m.group(1)
+    if not gy:
+        m = re.search(r'(20\d{2})\s*年?\s*(?:毕业|届)', text)
+        if m:
+            gy = m.group(1)
+    if not gy:
+        edu_text = ""
+        for sec in sections_result.get('sections', []):
+            if sec['type'] == 'education':
+                edu_text = sec.get('content', '') or ''
                 break
-            # 只有单个年份
-            single_year = re.search(r'(20\d{2})', tr)
-            if single_year:
-                info["graduation_year"] = single_year.group(1)
+        if not edu_text:
+            edu_text = "\n".join(
+                l for l in lines
+                if re.search(r'大学|学院|School|University|College', l, re.I)
+            )
+        years = [int(y) for y in re.findall(r'(20\d{2})', edu_text)]
+        if years:
+            gy = str(max(years))
+    if gy:
+        info["graduation_year"] = gy
+
     
     # GPA
     gpa_m = re.search(r'(?:GPA|绩点|平均分|均分)[：:\s]*([\d.]+(?:\/\d+)?)', text, re.I)
@@ -629,6 +788,21 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
                 skills_set.add(normalized)
                 break
     
+    # 方法1.5: 技能章节里的原始条目
+    # 词典不可能收全（内容策划、Photoshop、SPSS 这类），技能章节本身就是用户
+    # 手写的清单，直接按分隔符取条目更可靠，不必强行套词典。
+    if skills_section:
+        for tok in _split_skill_tokens(skill_context):
+            tok = re.sub(r'^(?:熟练|精通|熟悉|掌握|了解|擅长|会|能)[：:\s]*', '', tok.strip())
+            tok = tok.strip(' ·-—\t')
+            if not (2 <= len(tok) <= 16):
+                continue
+            if re.search(r'[。；;：:]', tok) or tok.lower() in _all_section_labels():
+                continue
+            if re.fullmatch(r'[\d.\s%]+', tok):
+                continue
+            skills_set.add(normalize_skill(tok) or tok)
+
     # 方法2: 从"熟悉/精通/了解/掌握"后面的内容提取
     skill_intro_patterns = [
         r'(?:熟练|精通|熟悉|掌握|了解|擅长|会|能用|使用过|用过|学习过|接触过)[：:\s、,，]+([^\n\r,，;；。]{2,60}?)(?=。|$|\n)',
@@ -661,10 +835,10 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
     if edu_section:
         edu_content = edu_section['content']
         # 尝试提取多条教育记录
-        edu_blocks = re.split(r'\n(?=\S{2,}(?:大学|学院|School))', edu_content)
+        edu_blocks = re.split(r'\n(?=\S{2,}(?:大学|学院|School|University|College|Institute))', edu_content)
         for block in edu_blocks[:3]:
             rec = {}
-            school_m = re.search(r'(\S{3,30}(?:大学|学院|School))', block)
+            school_m = re.search(r'(\S{3,30}(?:大学|学院|School|University|College|Institute))', block)
             if school_m: rec["school"] = school_m.group(1)
             
             try:
@@ -684,7 +858,7 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
                 info["education_records"].append(rec)
         
         if not info["school"] and edu_content:
-            info["school"] = (re.search(r'(\S{3,30}(?:大学|学院|School))', edu_content) or ['', ''])[1]
+            info["school"] = (re.search(r'(\S{3,30}(?:大学|学院|School|University|College|Institute))', edu_content) or ['', ''])[1]
         if not info["major"] and edu_content:
             for mj in major_list:
                 if mj in edu_content:
@@ -692,14 +866,13 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
                     break
     
     # ---- 经验记录 ----
-    exp_section = None
-    for sec in sections_result.get('sections', []):
-        if sec['type'] == 'experience':
-            exp_section = sec
-            break
-    
-    if exp_section:
-        exp_content = exp_section['content']
+    # 同一类型可能被切成多段（"实习经历" 和 "工作经历" 分开写），全部合并处理
+    exp_content = '\n'.join(
+        s.get('content', '') for s in sections_result.get('sections', [])
+        if s['type'] == 'experience'
+    )
+
+    if exp_content:
         # 切块：以「日期开头」或「公司名常见结尾」开头的行为分隔点
         # 不能只认「XX有限公司」——校招简历里多是「小红书」「携程」这种短名
         exp_blocks = re.split(
@@ -739,15 +912,21 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
             if len(info["experience_records"]) >= 6:
                 break
     
+    # 没有任何章节标题时退化为按日期切块（纯段落式简历）
+    if not info["experience_records"]:
+        info["experience_records"] = _records_without_sections(
+            cleaned_text, max_items=4,
+            exclude=r'大学|学院|School|University|College',
+        )
+
     # ---- 项目记录 ----
-    proj_section = None
-    for sec in sections_result.get('sections', []):
-        if sec['type'] == 'projects':
-            proj_section = sec
-            break
-    
-    if proj_section:
-        proj_content = proj_section['content']
+    # 同理：科研经历 / 项目经历 / 作品集 可能各成一段，合并后统一切块
+    proj_content = '\n'.join(
+        s.get('content', '') for s in sections_result.get('sections', [])
+        if s['type'] == 'projects'
+    )
+
+    if proj_content:
         proj_blocks = re.split(
             r'\n(?=(?:(?:19|20)\d{2}\s*[.\-/年]'
             r'|\S{2,}(?:项目|系统|平台|APP|网站|小程序|模块|工具|算法|模型)))',
@@ -785,16 +964,50 @@ def structured_extract(cleaned_text, sections_result, target_position=""):
                 info["project_records"].append(rec)
     
     # ---- 证书 ----
-    cert_patterns = [
-        r'([^\s\n,，;；]{2,30}(?:证书|认证|资格证|等级证|工程师|分析师|设计师|师级))',
-        r'(?:获得|考取|持有|通过|取得)[：:\s]*([^\s\n,，;；]{2,30}(?:证书|认证|资格))',
-        r'(CET-[46]|CET-6|CET-4|英语四级|英语六级|托福|雅思|IELTS|TOEFL|GRE|GMAT|PMP|CPA|CFA|FRM)',
-    ]
-    for cp in cert_patterns:
-        certs_found = re.findall(cp, text, re.I)
-        for c in certs_found:
-            if c and c not in info["certifications"]:
-                info["certifications"].append(c.strip())
+    # 有「证书」章节就以章节为准（整段都是证书名），否则才全文兜底。
+    # 全文兜底必须排掉职位名，否则「软件测试工程师」这种求职意向会被当成证书。
+    cert_section = ""
+    for sec in sections_result.get('sections', []):
+        if sec['type'] == 'certifications':
+            cert_section = sec.get('content', '') or ''
+            break
+
+    if cert_section:
+        for item in re.split(r'[、,，;；/\n|｜]', cert_section):
+            item = item.strip(' ·•-\t')
+            if 2 <= len(item) <= 40 and item not in info["certifications"]:
+                info["certifications"].append(item)
+    else:
+        cert_patterns = [
+            r'([^\s\n,，;；]{2,30}(?:证书|认证|资格证|等级证|师级))',
+            r'(?:获得|考取|持有|通过|取得)[：:\s]*([^\s\n,，;；]{2,30}(?:证书|认证|资格))',
+            r'(CET-[46]|英语四级|英语六级|托福|雅思|IELTS|TOEFL|GRE|GMAT|PMP|CPA|CFA|FRM)',
+        ]
+        for cp in cert_patterns:
+            for c in re.findall(cp, text, re.I):
+                c = c.strip()
+                if c and c not in info["certifications"]:
+                    info["certifications"].append(c)
+    info["certifications"] = info["certifications"][:12]
+
+    # ---- 荣誉奖项 ----
+    # 老版本声明了这个字段却从没赋值，导致「荣誉奖项」整段被丢掉。
+    awards_section = ""
+    for sec in sections_result.get('sections', []):
+        if sec['type'] == 'awards':
+            awards_section = sec.get('content', '') or ''
+            break
+    if awards_section:
+        for line in awards_section.split('\n'):
+            item = line.strip(' ·•-—–\t')
+            if not item or len(item) < 3 or len(item) > 60:
+                continue
+            if item.lower() in ('荣誉', '奖项', '获奖', '荣誉奖励', '奖学金', 'awards'):
+                continue
+            if item not in info["awards"]:
+                info["awards"].append(item)
+    info["awards"] = info["awards"][:12]
+
     
     # ---- 自我评价 ----
     self_eval_patterns = [
@@ -1625,12 +1838,12 @@ async def health():
     llm_info = llm.health()
     return {
         "status": "ok",
-        "message": "Offer Hunter API v3.4 — Real Jobs, Traceable Sources",
+        "message": "Offer Hunter API v3.5 — Measured Parsing, Interview Drill",
         "engine_version": ENGINE_VERSION,
         "features": ["PyMuPDF Extraction", "Content Cleaning", "PDF Usability Guard",
                      "Rule-Based Section Detection", "Skill Normalization", "Real ATS Scoring",
                      "Field-Level Job Matching", "LLM Resume Parsing", "LLM Resume Rewrite",
-                     "LLM Career Coaching", "Job Store (SQLite)", "JD Import", "Source Traceability", "Stale Data Guard"],
+                     "LLM Career Coaching", "Job Store (SQLite)", "JD Import", "Source Traceability", "Stale Data Guard", "Parse Accuracy Benchmark", "Interview Question Bank", "Deterministic Answer Scoring"],
         "job_count": len(JOBS()),
         "has_pymupdf": HAS_PYMUPDF,
         "llm": {
@@ -1686,6 +1899,40 @@ async def get_jobs(position: str = "", city: str = "", industry: str = "",
         "stale": sum(1 for j in result if j.get("is_stale")),
         "message": "ok",
     }
+
+
+@app.post("/api/interview/plan")
+async def interview_plan(payload: dict):
+    """生成一场面试的题单。
+
+    无状态：前端把解析结果和 JD 传上来即可，不依赖服务端 session
+    （Render 免费实例会重启，存 session 只会给自己挖坑）。
+    """
+    parsed = payload.get("parsed") or {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    plan = interview.build_plan(
+        (payload.get("target_position") or "").strip(),
+        parsed,
+        payload.get("jd_text") or "",
+    )
+    return {"code": 0, "data": plan, "message": "ok"}
+
+
+@app.post("/api/interview/answer")
+async def interview_answer(payload: dict):
+    """对单题作答打分。题目由前端回传，保证无状态。"""
+    question = payload.get("question") or {}
+    if not isinstance(question, dict) or not question.get("question"):
+        return JSONResponse(
+            status_code=400,
+            content={"code": -1, "message": "缺少题目信息，无法评分"},
+        )
+    answer = payload.get("answer") or ""
+    if not isinstance(answer, str):
+        answer = str(answer)
+    result = interview.score_answer(question, answer[:4000])
+    return {"code": 0, "data": result, "message": "ok"}
 
 
 @app.post("/api/jobs/parse")

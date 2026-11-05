@@ -214,6 +214,30 @@ function transformAnalysisData(raw) {
 }
 
 /**
+ * 生成面试题单
+ * @param {{target_position: string, parsed: object, jd_text?: string}} payload
+ */
+export async function buildInterviewPlan(payload) {
+  const response = await api.post('/interview/plan', payload, { timeout: 15000 })
+  if (response.data?.code !== 0) {
+    throw new Error(response.data?.message || '题单生成失败')
+  }
+  return response.data.data
+}
+
+/**
+ * 给单题作答打分
+ * @param {{question: object, answer: string}} payload
+ */
+export async function scoreInterviewAnswer(payload) {
+  const response = await api.post('/interview/answer', payload, { timeout: 15000 })
+  if (response.data?.code !== 0) {
+    throw new Error(response.data?.message || '评分失败')
+  }
+  return response.data.data
+}
+
+/**
  * 获取岗位列表
  *
  * 失败时直接抛错，不再回退到本地假数据。

@@ -1,0 +1,103 @@
+{
+  "_comment": "每份样本的期望解析结果。keys 为必测字段；skills_any 要求至少命中一半；records_min 为记录条数下限。",
+  "01_fresh_ops.pdf": {
+    "name": "李思远",
+    "phone": "13912345678",
+    "email": "lisiyuan@163.com",
+    "school": "上海财经大学",
+    "major": "市场营销",
+    "education_level": "本科",
+    "graduation_year": "2026",
+    "skills_any": ["内容策划", "数据分析", "Excel", "用户增长"],
+    "records_min": { "experience": 2, "project": 1 },
+    "awards_min": 2,
+    "target": "新媒体运营"
+  },
+  "02_social_backend.pdf": {
+    "name": "陈浩",
+    "phone": "15900008888",
+    "email": "chenhao.dev@gmail.com",
+    "school": "浙江大学",
+    "major": "软件工程",
+    "education_level": "本科",
+    "graduation_year": "2019",
+    "skills_any": ["Java", "Redis", "Kafka", "MySQL", "Docker"],
+    "records_min": { "experience": 2 },
+    "target": "后端开发工程师"
+  },
+  "03_two_column_da.pdf": {
+    "name": "赵雪",
+    "phone": "18612345678",
+    "email": "zhaoxue@outlook.com",
+    "school": "武汉大学",
+    "major": "统计学",
+    "education_level": "本科",
+    "graduation_year": "2023",
+    "skills_any": ["Python", "SQL", "Tableau", "A/B测试"],
+    "records_min": { "experience": 1, "project": 1 },
+    "target": "数据分析师"
+  },
+  "04_english_da.pdf": {
+    "name": "Emily Zhang",
+    "phone": "13700008888",
+    "email": "emily.zhang@example.com",
+    "school": "Fudan University",
+    "major": "Statistics",
+    "education_level": "本科",
+    "graduation_year": "2020",
+    "skills_any": ["Python", "SQL", "Tableau"],
+    "records_min": { "experience": 1, "project": 1 },
+    "target": "数据分析师"
+  },
+  "05_master_alg.pdf": {
+    "name": "周子墨",
+    "phone": "13711112222",
+    "email": "zhouzimo@126.com",
+    "school": "北京邮电大学",
+    "major": "计算机科学与技术",
+    "education_level": "硕士",
+    "graduation_year": "2026",
+    "skills_any": ["Python", "PyTorch", "RAG", "LLM"],
+    "records_min": { "project": 2 },
+    "awards_min": 2,
+    "target": "算法工程师"
+  },
+  "06_table_pm.pdf": {
+    "name": "孙悦",
+    "phone": "13566667777",
+    "email": "sunyue@qq.com",
+    "school": "中山大学",
+    "education_level": "硕士",
+    "graduation_year": "2024",
+    "skills_any": ["Axure", "SQL", "A/B测试"],
+    "certifications_any": ["PMP"],
+    "records_min": { "experience": 1, "project": 1 },
+    "target": "产品经理"
+  },
+  "07_no_heading_fe.pdf": {
+    "name": "吴桐",
+    "phone": "13022223333",
+    "email": "wutong@foxmail.com",
+    "school": "电子科技大学",
+    "major": "软件工程",
+    "education_level": "本科",
+    "graduation_year": "2021",
+    "skills_any": ["React", "Vue", "TypeScript"],
+    "records_min": { "experience": 2 },
+    "target": "前端开发工程师"
+  },
+  "08_two_page_qa.pdf": {
+    "name": "何雨",
+    "phone": "13233334444",
+    "email": "heyu.test@163.com",
+    "school": "南京航空航天大学",
+    "major": "计算机科学与技术",
+    "education_level": "本科",
+    "graduation_year": "2020",
+    "skills_any": ["Python", "MySQL", "Linux"],
+    "records_min": { "experience": 1, "project": 1 },
+    "awards_min": 2,
+    "certifications_any": ["软件评测师"],
+    "target": "软件测试工程师"
+  }
+}

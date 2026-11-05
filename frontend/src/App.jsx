@@ -4,6 +4,7 @@ import { AlertTriangle, RefreshCw } from 'lucide-react'
 import HomePage from './pages/HomePage'
 import Dashboard from './pages/Dashboard'
 import JobsPage from './pages/JobsPage'
+import InterviewPage from './pages/InterviewPage'
 import Header from './components/Header'
 import ErrorBoundary from './components/ErrorBoundary'
 
@@ -88,6 +89,7 @@ function App() {
           <Route path="/" element={<HomePage onAnalysisComplete={setAnalysisData} />} />
           <Route path="/dashboard" element={<DashboardWrapper data={analysisData} />} />
           <Route path="/jobs" element={<JobsPage />} />
+          <Route path="/interview" element={<InterviewPage />} />
         </Routes>
       </ErrorBoundary>
     </div>

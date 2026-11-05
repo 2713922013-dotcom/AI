@@ -1,6 +1,6 @@
 import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { Target, FileText, Search, BarChart3 } from 'lucide-react'
+import { Target, FileText, Search, BarChart3, Mic } from 'lucide-react'
 
 const Header = () => {
   const location = useLocation()
@@ -8,6 +8,7 @@ const Header = () => {
   const navItems = [
     { path: '/', label: '首页', icon: FileText },
     { path: '/jobs', label: '岗位浏览', icon: Search },
+    { path: '/interview', label: '模拟面试', icon: Mic },
     { path: '/dashboard', label: '分析仪表盘', icon: BarChart3 },
   ]
 
