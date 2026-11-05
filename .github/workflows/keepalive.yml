@@ -1,0 +1,32 @@
+name: Keep Render Awake
+
+# Render 免费版无人访问 15 分钟会休眠，冷启动要 50 秒以上。
+# 这里每 10 分钟戳一次健康检查，让实例始终在线。
+# 注意：GitHub 会在仓库 60 天无提交后自动停用定时任务，届时任意一次 push 即可恢复。
+
+on:
+  schedule:
+    # 5 分钟一次：GitHub 定时任务高峰时会延迟几分钟，
+    # 留出余量才不会撞上 Render「15 分钟无访问即休眠」的阈值
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping health endpoint
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o /tmp/health.json -w '%{http_code}' -m 60 \
+              https://offer-hunter-api.onrender.com/api/health || true)
+            echo "第 $i 次尝试 -> HTTP $code"
+            if [ "$code" = "200" ]; then
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "健康检查未通过，可能是部署中"
+          exit 1
