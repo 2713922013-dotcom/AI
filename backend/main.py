@@ -27,7 +27,9 @@ from concurrent.futures import ThreadPoolExecutor
 import llm
 import llm_agents
 
-app = FastAPI(title="Offer Hunter API", version="3.0.0")
+ENGINE_VERSION = "3.3.0"  # 单一版本号来源，health 与 analyze 共用，避免两处不一致
+
+app = FastAPI(title="Offer Hunter API", version=ENGINE_VERSION)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # ============================================================
@@ -1676,7 +1678,7 @@ async def health():
     return {
         "status": "ok",
         "message": "Offer Hunter API v3.3 — Grounded Resume Rewriter",
-        "engine_version": "3.3.0",
+        "engine_version": ENGINE_VERSION,
         "features": ["PyMuPDF Extraction", "Content Cleaning", "PDF Usability Guard",
                      "Rule-Based Section Detection", "Skill Normalization", "Real ATS Scoring",
                      "Field-Level Job Matching", "LLM Resume Parsing", "LLM Resume Rewrite",
@@ -2189,7 +2191,7 @@ async def analyze_resume(
         analysis_result = {
             "session_id": session_id,
             "timestamp": datetime.now().isoformat(),
-            "engine_version": "3.0.0",
+            "engine_version": ENGINE_VERSION,
             "target_position": target_position,
             "target_city": target_city,
             
