@@ -1361,158 +1361,228 @@ def generate_learning_path(skill_name, category):
     return path_templates.get(category, f"深入学习{skill_name}的核心原理和行业最佳实践，结合实际项目练习")
 
 
+# ------------------------------------------------------------
+# 简历改写辅助：判断一句话里有没有真实数字
+# ------------------------------------------------------------
+_METRIC_RE = re.compile(
+    r'\d'  # 阿拉伯数字：8000+、3.2万、1200万、5所 都算已量化
+    r'|[一二三四五六七八九十百千万]+(?:所|次|个|场|人|名|天|周|月|倍|成|%|％)'
+)
+_BULLET_PREFIX_RE = re.compile(r'^[\s\-–—•·*●○]+')
+
+
+def _has_metric(text):
+    """是否包含可量化的真实数字（阿拉伯数字或中文数量词）"""
+    return bool(_METRIC_RE.search(text or ''))
+
+
+def _split_bullets(text):
+    """把一段描述拆成条目，过滤纯日期行和过短碎片"""
+    items = []
+    for raw in re.split(r'[\n\r]+', text or ''):
+        line = _BULLET_PREFIX_RE.sub('', raw).strip().strip('。；;，,')
+        if len(line) >= 8 and not re.match(r'^[\d\s\-–—:.年月日/]+$', line):
+            items.append(line)
+    return items
+
+
+def _rewrite_bullet(line):
+    """
+    改写单条描述：
+    - 已有数字 → 原样保留，不夸大也不编造
+    - 没有数字 → 保留事实，标出该补数字的位置，交给作者填真值
+    """
+    if _has_metric(line):
+        return line
+    return f"{line}　→【补真实数字：规模/次数/提升幅度】"
+
+
+def _entry_header(rec, with_tech=False):
+    """拼「时间｜公司｜职位」或「时间｜项目名｜技术栈」单行头"""
+    parts = []
+    for key in ('time_range', 'company', 'position', 'name'):
+        val = rec.get(key)
+        if val:
+            parts.append(str(val))
+    if with_tech:
+        tech = rec.get('tech_stack') or []
+        if isinstance(tech, str):
+            tech = [tech]
+        tech = [str(t) for t in tech if t]
+        if tech:
+            parts.append('技术栈：' + '、'.join(tech[:6]))
+    return '｜'.join(parts)
+
+
 # ============================================================
-# Step 9: 简历优化建议（针对性）
+# Step 9: 简历优化建议（规则版）
 # ============================================================
 def generate_targeted_suggestions(parsed_info, ats_result, gap_analysis, target_position):
     """
-    Step 9: 针对缺失技能生成精准优化建议
-    而不是泛泛而谈
+    设计原则：只改写简历里真实存在的内容，一个字都不编。
+
+      1. 原文有数字   → 原样保留，只调整结构
+      2. 原文没数字   → 保留事实，标出「该补数字」的位置，交给作者填真值
+      3. 缺关键词     → 指出能写进哪一段经历，而不是凭空编一段经历
+
+    为什么这么做：编造的量化数据（比如没做过的 QPS、没测过的提升比例）
+    在面试追问下必然穿帮，对候选人只有害处。宁可让作者自己填。
     """
     sections = []
-    
-    name = parsed_info.get('name', '') or '求职者'
     pos = target_position or '目标岗位'
-    skills = parsed_info.get('skills', []) or []
-    
-    # === 个人总结 ===
-    summary_optimized = (
-        f"{name} | 应聘{pos} | 具备{len(skills)}项核心技术，"
-        f"擅长将业务需求转化为技术方案。"
-    )
-    edu = parsed_info.get('education', '') or ''
-    school = parsed_info.get('school', '') or ''
-    if school:
-        summary_optimized += f"| 毕业于{school}"
-    if edu:
-        summary_optimized += f"({edu})"
-    summary_optimized += "| 有完整的从0到1项目落地经验，追求代码质量与用户体验的平衡。"
-    
+    skills = parsed_info.get('skills') or []
+    experiences = parsed_info.get('experience_records') or []
+    projects = parsed_info.get('project_records') or []
+    matched = gap_analysis.get('matched_skills') or []
+    missing = gap_analysis.get('missing_skills') or []
+
+    name = (parsed_info.get('name') or '').strip()
+    edu = (parsed_info.get('education') or '').strip()
+    school = (parsed_info.get('school') or '').strip()
+    major = (parsed_info.get('major') or '').strip()
+
+    # ===== 1. 个人总结：用真实字段拼，不写空话 =====
+    title_parts = [p for p in (edu, school, major) if p]
+    head = '｜'.join([p for p in [name, ' '.join(title_parts)] if p])
+    top_skills = (matched or skills)[:6]
+
+    summary_lines = []
+    if head:
+        summary_lines.append(head)
+    summary_lines.append(f"求职意向：{pos}")
+    if top_skills:
+        summary_lines.append('核心技能：' + '、'.join([str(s) for s in top_skills]))
+    counters = []
+    if experiences:
+        counters.append(f"{len(experiences)} 段实习/工作经历")
+    if projects:
+        counters.append(f"{len(projects)} 个项目")
+    if counters:
+        summary_lines.append(' · '.join(counters))
+
+    original_summary = (parsed_info.get('self_evaluation') or '').strip()
     sections.append({
         "section": "个人总结",
-        "reason": "原版缺少核心竞争力定位和差异化亮点",
-        "original": (parsed_info.get('self_evaluation', '') or '')[:80] or "个人简介较为简略或未检测到",
-        "optimized": summary_optimized,
+        "reason": "用真实字段替换「个人简历」「性格开朗」这类零信息开头，HR 扫读时第一眼就能看到学历、方向、核心技能",
+        "original": original_summary[:120] or "未检测到个人总结段落",
+        "optimized": '\n'.join(summary_lines),
     })
-    
-    # === 项目经历（根据实际技能定制）===
-    tech_stack = ', '.join(skills[:6]) if skills else '相关技术栈'
-    
-    # 根据岗位方向定制
-    if any(kw in pos+str(skills) for kw in ['后端', 'server', 'Java', 'Go', 'Python', 'Spring', '微服务']):
-        optimized_proj = (
-            f"负责核心模块架构设计({tech_stack})，实现接口响应时间<200ms，QPS支持5000+。"
-            f"通过缓存优化将DB压力降低70%，主导Code Review机制使Bug率下降40%。"
-        )
-    elif any(kw in pos+str(skills) for kw in ['前端', 'front', 'React', 'Vue', 'JavaScript', 'UI', 'CSS']):
-        optimized_proj = (
-            f"独立负责前端架构升级({tech_stack})，首屏加载时间从3.2s优化至1.1s，"
-            f"Lighthouse评分从62提升至92。封装通用组件库，复用率达85%，团队开发效率提升50%。"
-        )
-    elif any(kw in pos+str(skills) for kw in ['运营', '策划', '产品', '游戏', '用户', '增长', '活动', '内容']):
-        optimized_proj = (
-            f"主导{pos}相关工作，策划并执行多场线上活动，DAU增长显著，转化率大幅提升。"
-            f"建立数据分析体系，通过A/B测试优化关键指标，用户留存率稳步提升。"
-            f"输出标准化SOP文档，推动流程规范化。"
-        )
-    elif any(kw in pos+str(skills) for kw in ['数据', '分析', 'BI', '数仓', 'SQL', 'Python']):
-        optimized_proj = (
-            f"搭建数据分析体系({tech_stack})，支撑业务决策，自动化报表覆盖核心指标。"
-            f"通过数据洞察推动产品迭代，关键业务指标提升20%以上。"
-        )
-    else:
-        optimized_proj = (
-            f"核心参与业务系统建设({tech_stack})，负责需求分析到上线全流程。"
-            f"通过流程优化将交付周期缩短30%，质量达标率保持在95%以上。"
-        )
-    
-    orig_proj = ""
-    for pr in (parsed_info.get('project_records') or [])[:1]:
-        orig_proj = pr.get('description', '')[:80] or f"参与{pr.get('name', '项目')}开发"
-    if not orig_proj:
-        orig_proj = "参与项目开发"
-    
-    sections.append({
-        "section": "项目经历",
-        "reason": "使用STAR法则重构，加入技术细节和可量化的业务影响",
-        "original": orig_proj,
-        "optimized": optimized_proj,
-    })
-    
-    # === 技能列表 ===
+
+    # ===== 2. 逐段经历改写（保留原文事实，只补结构）=====
+    for i, rec in enumerate(experiences[:3], 1):
+        bullets = _split_bullets(rec.get('description') or '')
+        header = _entry_header(rec) or f"经历 {i}"
+        if not bullets:
+            continue
+        body = '\n'.join('· ' + _rewrite_bullet(b) for b in bullets)
+        no_metric = sum(1 for b in bullets if not _has_metric(b))
+        reason = "统一为「时间｜公司｜职位」单行头，方便 ATS 识别起止时间与任职时长"
+        if no_metric:
+            reason += f"；{no_metric} 条描述缺数字，已标出补全位置"
+        sections.append({
+            "section": f"经历改写 {i}：{rec.get('company') or rec.get('position') or '未命名'}",
+            "reason": reason,
+            "original": '\n'.join(bullets)[:200],
+            "optimized": header + '\n' + body,
+        })
+
+    # ===== 3. 逐个项目改写 =====
+    for i, rec in enumerate(projects[:2], 1):
+        bullets = _split_bullets(rec.get('description') or '')
+        header = _entry_header(rec, with_tech=True) or f"项目 {i}"
+        if bullets:
+            body = '\n'.join('· ' + _rewrite_bullet(b) for b in bullets)
+            no_metric = sum(1 for b in bullets if not _has_metric(b))
+        else:
+            body = '· 【补一句：这个项目解决什么问题、你负责哪一部分】'
+            no_metric = 1
+        reason = "补全「项目名｜时间｜技术栈」，让 ATS 和面试官都能快速判断项目与岗位的相关性"
+        if no_metric:
+            reason += "；缺结果数字的位置已标出"
+        sections.append({
+            "section": f"项目改写 {i}：{rec.get('name') or '未命名项目'}",
+            "reason": reason,
+            "original": (rec.get('description') or '')[:200] or "未检测到项目描述",
+            "optimized": header + '\n' + body,
+        })
+
+    # ===== 4. 技能列表：按岗位相关性分组，不写没学过的 =====
     if skills:
-        advanced = [s for s in skills if s in ('Python','Java','Go','C++','JavaScript','TypeScript','React','Vue',
-                                                  '机器学习','深度学习','PyTorch','Unity','Unreal Engine')]
-        intermediate = [s for s in skills if s not in advanced]
-        opt_parts = []
-        if advanced:
-            opt_parts.append(f"精通: {', '.join(advanced[:5])}")
-        if intermediate:
-            opt_parts.append(f"熟练: {', '.join(intermediate[:7])}")
-        opt_parts.append("了解: 云原生架构设计、敏捷开发方法论、AI辅助工具链")
-        opt_skill = '\n'.join(opt_parts)
+        matched_list = [s for s in skills if s in matched]
+        others = [s for s in skills if s not in matched]
+        lines = []
+        if matched_list:
+            lines.append('岗位直接相关：' + '、'.join([str(s) for s in matched_list[:8]]))
+        if others:
+            lines.append('其他技能：' + '、'.join([str(s) for s in others[:10]]))
         sections.append({
             "section": "技能列表",
-            "reason": "按熟练度分级展示，突出与目标岗位最相关的核心技术栈",
-            "original": f"熟悉{'、'.join(skills[:6])}" if skills else "未检测到技能标签",
-            "optimized": opt_skill,
+            "reason": f"把岗位真正要求的 {len(matched_list)} 项技能前置，其余归入「其他技能」；只写真实掌握的技术，避免面试被追问",
+            "original": '、'.join([str(s) for s in skills[:10]]),
+            "optimized": '\n'.join(lines),
         })
-    
-    # === 针对性改进建议（基于ATS问题和技能缺口）====
-    ats_issues = ats_result.get('issues', []) or []
-    missing_high = [ms for ms in (gap_analysis.get('missing_skills') or []) if ms.get('importance') == '高']
-    
-    # 缺少量化数据
-    if ats_result.get('dimensions', [{}])[0].get('score', 0) < 24 or any('量' in issue for issue in ats_issues):
-        pass  # 已在上面覆盖
-    
-    # 缺少技术外链
-    has_github = any(kw in str(parsed_info.get('project_records','')) for kw in ['github','gitee','博客','blog'])
-    if not has_github:
+
+    # ===== 5. 缺失关键词：给出可写入的位置，而不是空泛建议 =====
+    where_labels = []
+    for rec in experiences[:2]:
+        label = rec.get('company') or rec.get('position')
+        if label:
+            where_labels.append(str(label))
+    for rec in projects[:1]:
+        if rec.get('name'):
+            where_labels.append(str(rec['name']))
+
+    high_missing = [m for m in missing if m.get('importance') == '高'][:3]
+    for ms in high_missing:
+        sk = (ms.get('name') or '').strip()
+        if not sk:
+            continue
+        freq = ms.get('frequency_in_jobs')
+        if isinstance(freq, (int, float)):
+            freq_n = int(freq)
+        elif isinstance(freq, (list, tuple)):
+            freq_n = len(freq)
+        else:
+            freq_n = 0
+        tips = []
+        for label in where_labels[:2]:
+            tips.append(f"「{label}」这段里，如果确实用过 {sk}，补一条具体做了什么")
+        tips.append(f"技能列表里放进「岗位直接相关」分组")
         sections.append({
-            "section": "技术影响力",
-            "reason": "缺乏技术外链会降低技术岗位竞争力约10-15分",
-            "original": "无技术社区活跃记录",
-            "optimized": (
-                "GitHub/Gitee 主页链接（附代表项目，Star>10优先）、"
-                "技术博客/掘金/CSDN 文章链接（每月至少1篇）、"
-                "StackOverflow/知乎技术问答贡献（回答>5个高质量问题）"
-            ),
+            "section": f"缺失关键词：{sk}",
+            "reason": f"{freq_n} 个目标岗位要求 {sk}，简历里没有出现该词，ATS 关键词匹配会直接失分",
+            "original": f"简历未出现「{sk}」",
+            "optimized": '\n'.join('· ' + t for t in tips)
+                         + f"\n· 没做过就先别写：{sk} 面试必被追问细节，写了答不上来更扣分",
         })
-    
-    # 证书不足
-    has_cert = bool(parsed_info.get('certifications'))
-    if not has_cert:
-        cert_suggestion = (
-            f"语言能力: CET-6 / 雅思6.5+ / 托福90+\n"
-            f"专业证书: 根据目标岗位「{pos}」考取对应认证\n"
-            f"软技能: PMP / 敏捷认证 / 产品经理认证（如有管理经验）"
-        )
+
+    # ===== 6. 证书与资质：只提示格式，不虚构证书 =====
+    if not parsed_info.get('certifications'):
         sections.append({
             "section": "证书与资质",
-            "reason": "行业认证是ATS加分项，尤其在校招/转岗场景",
-            "original": "无证书信息",
-            "optimized": cert_suggestion,
+            "reason": "证书是 ATS 的天然关键词来源，但只写真实持有的",
+            "original": "未检测到证书信息",
+            "optimized": ("· 已有的请补全「名称 + 取得年份」，如：CET-6（2023）\n"
+                          f"· 与「{pos}」强相关的认证放到靠前位置\n"
+                          "· 备考中的写「备考中」，不要写成已通过"),
         })
-    
-    # 缺失的高优技能的具体建议
-    for ms in missing_high[:3]:
-        sk_name = ms['name']
-        sk_cat = ms['category']
-        freq_jobs = ms.get('frequency_in_jobs', 0)
-        if isinstance(freq_jobs, (int, float)):
-            freq_count = int(freq_jobs)
-        else:
-            freq_count = len(freq_jobs or [])
+
+    # ===== 7. 技术岗专属：技术外链 =====
+    tech_pos = any(k in f"{pos}{''.join([str(s) for s in skills])}"
+                   for k in ('开发', '工程师', '算法', '前端', '后端', '数据', '测试', '运维'))
+    proj_text = str(projects).lower()
+    if tech_pos and not any(k in proj_text for k in ('github', 'gitee', 'blog', '博客')):
         sections.append({
-            "section": f"技能补充: {sk_name}",
-            "reason": f"该技能在{freq_count}个目标岗位中被要求，属于高优先级缺口",
-            "original": f"当前简历未提及「{sk_name}」相关能力",
-            "optimized": f"{sk_name}: {generate_learning_path(sk_name, sk_cat)}",
+            "section": "技术影响力",
+            "reason": "技术岗简历缺代码/文章链接，HR 无法验证实际水平，竞争力会掉 10 分左右",
+            "original": "未检测到技术主页或文章链接",
+            "optimized": ("· GitHub/Gitee 主页链接（把最相关的两个项目置顶并写 README）\n"
+                          "· 技术文章链接（把做过的事写成一篇复盘，比空链接更有说服力）\n"
+                          "· 没有的话先在面试前补一个，比在简历里留空好"),
         })
-    
+
     return {
-        "original": (gap_analysis.get('current_skills', []) or []).__str__()[:300],
+        "original": '、'.join([str(s) for s in skills[:12]])[:300],
         "optimized_sections": sections,
     }
 
@@ -1605,8 +1675,8 @@ async def health():
     llm_info = llm.health()
     return {
         "status": "ok",
-        "message": "Offer Hunter API v3.2 — LLM-Enhanced Resume Intelligence",
-        "engine_version": "3.2.0",
+        "message": "Offer Hunter API v3.3 — Grounded Resume Rewriter",
+        "engine_version": "3.3.0",
         "features": ["PyMuPDF Extraction", "Content Cleaning", "PDF Usability Guard",
                      "Rule-Based Section Detection", "Skill Normalization", "Real ATS Scoring",
                      "Field-Level Job Matching", "LLM Resume Parsing", "LLM Resume Rewrite",

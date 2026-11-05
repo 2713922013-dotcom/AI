@@ -10,6 +10,7 @@
 运行：venv/Scripts/python.exe test_pipeline.py
 """
 import io
+import re
 import sys
 
 import fitz
@@ -143,6 +144,53 @@ def test_forecast_is_deterministic():
     assert a["competitiveness_score"] == b["competitiveness_score"]
     assert 0 <= a["offer_probability"] <= a["interview_probability"] <= 100
     print(f"  ✓ 预测可复现：面试 {a['interview_probability']}% / Offer {a['offer_probability']}%")
+
+
+# ---------- 5. 优化建议不能编造数字 ----------
+def test_suggestions_are_grounded():
+    """
+    简历改写曾整段是模板：无论简历内容如何，都输出「QPS 5000+」
+    「Bug率下降40%」「Lighthouse 62→92」这些没发生过的数字。
+    候选人照抄进真简历，面试一追问就穿帮。
+    """
+    text, _, cleaned, _, parsed = _prepare(_pdf_with_text(SAMPLE_RESUME))
+    ats = main.calculate_ats_score(parsed, "产品运营", ["产品运营", "数据分析"])
+    gap = main.analyze_skill_gap(parsed, [], "产品运营")
+    result = main.generate_targeted_suggestions(parsed, ats, gap, "产品运营")
+    sections = result["optimized_sections"]
+    assert sections, "优化建议为空"
+
+    all_text = "\n".join(s["optimized"] for s in sections)
+    for fake in ("QPS", "5000+", "Lighthouse", "Bug率", "复用率", "从0到1项目落地"):
+        assert fake not in all_text, f"仍存在编造内容：{fake}"
+
+    # 改写后的每一条都必须来自原文（去掉占位提示后是原文子串）
+    norm = lambda s: re.sub(r"\s+", "", s or "")
+    source = norm(cleaned)
+    placeholders = 0
+    for s in sections:
+        if not s["section"].startswith(("经历改写", "项目改写")):
+            continue
+        for line in s["optimized"].split("\n"):
+            if not line.startswith("· "):
+                continue
+            content = line[2:].split("　→")[0].strip()
+            if "【补" in content:
+                placeholders += 1
+                continue
+            assert norm(content) in source, f"改写出原文不存在的内容：{content}"
+
+    print(f"  ✓ 优化建议全部有原文依据（{placeholders} 处标注待补真实数字，0 处编造）")
+
+
+def test_metric_detection():
+    """量化判断不能把「5所高校」「8000+」当成没数字"""
+    assert main._has_metric("覆盖5所高校，累计用户8000+")
+    assert main._has_metric("主导3场话题活动")
+    assert main._has_metric("服务超过十万名用户")
+    assert not main._has_metric("每周输出数据周报，使用SQL完成留存与转化分析")
+    assert not main._has_metric("负责用户增长相关工作，策划多场活动")
+    print("  ✓ 量化识别准确（中文数量词与 +号 均可识别）")
 
 
 if __name__ == "__main__":
