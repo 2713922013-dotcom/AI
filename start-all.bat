@@ -31,7 +31,7 @@ echo 本地地址：http://localhost:3000
 echo 后端文档：http://127.0.0.1:8000/docs
 echo.
 echo 改完代码在这里看到效果后，再执行下面两条命令上线：
-echo    git add -A && git commit -m "说明"
+echo    git add -A ^&^& git commit -m "说明"
 echo    git push origin main
 echo.
 pause
